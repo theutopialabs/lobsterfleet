@@ -1,0 +1,31 @@
+node_modules/
+.pnpm-store/
+dist/
+build/
+*.log
+
+# local runtime state
+data/
+*.db
+*.db-shm
+*.db-wal
+archives/
+
+# secrets / env
+.env
+.env.local
+*.local
+.codex/
+
+.DS_Store
+
+*.tsbuildinfo
+
+.secrets/
+server/.env
+*.pem
+id_ed25519*
+
+# scratch
+tmp/
+logs/

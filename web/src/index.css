@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+/* Premium dark theme tokens. Keynote aesthetic: deep space background, hairline
+   borders, electric accents, generous spacing. */
+@theme {
+  --color-bg: #06070a;
+  --color-bg-soft: #0b0d12;
+  --color-panel: #0e1118;
+  --color-line: #1b1f2a;
+  --color-line-soft: #14171f;
+  --color-ink: #f4f6fb;
+  --color-muted: #9aa3b2;
+  --color-faint: #5b6373;
+  --color-accent: #6d5efc;
+  --color-accent-2: #28c8ff;
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #fb6f84;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* Ambient background glow, keynote-style. */
+.aurora {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background:
+    radial-gradient(60rem 40rem at 12% -10%, rgba(109, 94, 252, 0.18), transparent 60%),
+    radial-gradient(50rem 36rem at 100% 0%, rgba(40, 200, 255, 0.12), transparent 55%),
+    radial-gradient(40rem 40rem at 50% 120%, rgba(109, 94, 252, 0.08), transparent 60%);
+}
+
+.glass {
+  background: color-mix(in srgb, var(--color-panel) 80%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-line);
+}
+
+.hairline {
+  border: 1px solid var(--color-line);
+}
+
+.brand-gradient {
+  background: linear-gradient(100deg, var(--color-ink), var(--color-accent-2) 60%, var(--color-accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 999px;
+}

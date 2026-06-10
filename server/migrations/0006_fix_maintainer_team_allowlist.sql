@@ -1,0 +1,1 @@
+-- No default team allowlist. Owners add users or teams from Admin.

@@ -1,0 +1,29 @@
+# systemd unit for lobsterfleet. Installed to /etc/systemd/system/lobsterfleet.service
+# by deploy/lxc-setup.sh. Runs the bundled server as the lobsterfleet user.
+
+[Unit]
+Description=lobsterfleet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lobsterfleet
+Group=lobsterfleet
+WorkingDirectory=/opt/lobsterfleet
+EnvironmentFile=/opt/lobsterfleet/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/lobsterfleet/server/dist/index.js
+Restart=always
+RestartSec=3
+
+# Light hardening. Kept loose enough that the app can still SSH out and write data/.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+# data/ is the only path the app writes. SSH needs no extra unless you store keys here.
+ReadWritePaths=/opt/lobsterfleet/data
+
+[Install]
+WantedBy=multi-user.target

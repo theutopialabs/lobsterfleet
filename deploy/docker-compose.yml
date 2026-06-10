@@ -1,0 +1,25 @@
+# Docker path for lobsterfleet. From the repo root:
+#   cp .env.example .env   # then fill it in
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Note: build context is the repo root (..) since the Dockerfile copies the
+# whole monorepo. The compose file lives in deploy/ so we point back up.
+
+services:
+  lobsterfleet:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: lobsterfleet
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    # All config lives in .env at the repo root.
+    env_file:
+      - ../.env
+    # Persist the sqlite db + session archives.
+    volumes:
+      - ../data:/app/data
+      # Codex auth for leased boxes: mount the host credential read-only
+      # (run `codex login` on the host first), or set OPENAI_API_KEY in .env.
+      # - ~/.codex/auth.json:/app/.codex/auth.json:ro
