@@ -6,7 +6,13 @@ import { motion } from "framer-motion";
 import { useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { InteractiveSession } from "../../lib/api";
-import { elapsed, runtimeHasVnc, sessionIsActive, sessionStatusLabel } from "../../lib/format";
+import {
+  elapsed,
+  runtimeHasVnc,
+  runtimeLabel,
+  sessionIsActive,
+  sessionStatusLabel,
+} from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { IconButton } from "../../components/Button";
 import { Chip, StatePill } from "../../components/Pill";
@@ -118,7 +124,7 @@ export function SessionTile({
       <div className="flex items-center gap-3 border-t border-[var(--color-line)] px-4 py-2 text-[11px] text-[var(--color-faint)]">
         <Chip mono>{session.id}</Chip>
         <span>up {elapsed(session.createdAt)}</span>
-        <span className="ml-auto">{session.runtime}</span>
+        <span className="ml-auto">{runtimeLabel(session.runtime)}</span>
       </div>
     </motion.div>
   );

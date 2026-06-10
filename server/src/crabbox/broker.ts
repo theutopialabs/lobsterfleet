@@ -43,6 +43,13 @@ export type CreateLeaseOpts = {
   sshPublicKey?: string;
   workRoot?: string;
   owner?: string;
+  // Ask the broker for a graphical desktop (GUI runtime). Omit/false = headless.
+  desktop?: boolean;
+  // Which desktop env to start when desktop is true (xfce, gnome, etc).
+  desktopEnv?: string;
+  // Box size class (standard/fast/large/beast). Falls back to the install
+  // default when unset. The broker maps the class to real hardware.
+  class?: string;
 };
 
 const DEFAULT_TTL_SECONDS = 3600;
@@ -117,7 +124,7 @@ export async function createLease(env: BrokerEnv, opts: CreateLeaseOpts = {}): P
     ...(opts.requestedSlug ? { requestedSlug: opts.requestedSlug } : {}),
     provider: env.CRABBOX_COORDINATOR_PROVIDER ?? "hetzner",
     target: "linux",
-    class: env.CRABBOX_COORDINATOR_CLASS ?? "standard",
+    class: (opts.class || env.CRABBOX_COORDINATOR_CLASS || "standard").trim(),
     // name our key in the provider account. without this the broker falls back
     // to its default key name and rejects our (different) public key.
     ...(env.CRABBOX_COORDINATOR_PROVIDER_KEY
@@ -127,6 +134,11 @@ export async function createLease(env: BrokerEnv, opts: CreateLeaseOpts = {}): P
     sshPort: "22",
     sshPublicKey,
     workRoot,
+    // Only send desktop when asked. GUI runtime sets this true so the broker
+    // brings up a graphical box; TUI runtime leaves it false (headless).
+    ...(opts.desktop
+      ? { desktop: true, desktopEnv: opts.desktopEnv || "xfce" }
+      : { desktop: false }),
     ttlSeconds: opts.ttlSeconds ?? toInt(env.CRABBOX_COORDINATOR_TTL_SECONDS, DEFAULT_TTL_SECONDS),
     idleTimeoutSeconds:
       opts.idleTimeoutSeconds ?? toInt(env.CRABBOX_COORDINATOR_IDLE_SECONDS, DEFAULT_IDLE_SECONDS),

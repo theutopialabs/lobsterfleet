@@ -1,10 +1,10 @@
 // Minimal ambient shims for the Cloudflare types the ported handler still
 // references. We dropped the Cloudflare runtime, so these only need to keep the
-// file typechecking. The matching runtime values live in cf-runtime.ts.
+// file typechecking on Node.
 //
 // Behavior note: in the Node port env.SANDBOX / env.DB-as-D1 / R2 buckets are
 // never set to real CF objects, so the branches guarded by them are dead. These
-// types just satisfy tsc for that dead code.
+// types just satisfy tsc for that code.
 
 // Base env bag. The real shape is RuntimeEnv in index.ts which intersects this.
 interface Env {

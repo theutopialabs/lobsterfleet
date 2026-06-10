@@ -1,8 +1,7 @@
 // Type-only shim for @cloudflare/sandbox. We dropped the Cloudflare container
-// runtime in the Node port, so none of these run, but the ported handler still
-// has the old container codepaths (all guarded by env.SANDBOX, which is never
-// set on Node). This shim keeps that dead code typechecking. The runtime values
-// (getSandbox, ContainerProxy, the Sandbox base) live in cf-runtime.ts.
+// runtime in the Node port, so none of these run. The handler only pulls a
+// couple of types (DirectoryBackup, Sandbox) from here for env.SANDBOX-guarded
+// branches that never fire on Node. This shim just keeps those types compiling.
 declare module "@cloudflare/sandbox" {
   export interface BackupOptions {
     dir: string;
@@ -44,13 +43,4 @@ declare module "@cloudflare/sandbox" {
     [key: string]: unknown;
   }
 
-  // Base class to extend (value). The Node entry never instantiates it.
-  export const Sandbox: {
-    new <Env = unknown>(...args: unknown[]): Sandbox<Env>;
-  };
-  export const ContainerProxy: unknown;
-  export function getSandbox<Env = unknown>(
-    namespace: unknown,
-    id: string,
-  ): Sandbox<Env>;
 }

@@ -134,7 +134,7 @@ export type InteractiveSession = {
   rootSessionId: string | null;
   repo: string;
   branch: string;
-  runtime: "crabbox" | "container";
+  runtime: "crabbox" | "crabbox-gui";
   command: string;
   prompt: string;
   purpose: string;
@@ -167,7 +167,7 @@ export type InteractiveSession = {
   logArchive: { eventCount: number } | null;
 };
 
-export type FleetRuntime = "crabbox" | "container";
+export type FleetRuntime = "crabbox" | "crabbox-gui";
 
 export type FleetState = {
   canonicalUrl: string;
@@ -191,6 +191,14 @@ export type FleetState = {
   sessions: unknown[];
 };
 
+// A box size the operator can pick. The server owns the list (env-overridable),
+// so the UI just renders whatever it gets. id is the broker class (standard,
+// beast, ...); label is for display.
+export type SizeOption = {
+  id: string;
+  label: string;
+};
+
 export type RepoWorkflow = {
   repo: string;
   status: "ok" | "missing" | "invalid" | "error";
@@ -212,6 +220,8 @@ export type ServerState = {
   cards: Card[];
   interactiveSessions: InteractiveSession[];
   fleet: FleetState;
+  sizes: SizeOption[];
+  defaultSize: string;
   preflight?: RuntimePreflight | null;
 };
 
@@ -285,6 +295,7 @@ export const endpoints = {
     repo: string;
     branch?: string;
     runtime?: string;
+    size?: string;
     command?: string;
     prompt?: string;
   }) => api.post<{ session: InteractiveSession }>("/api/interactive-sessions", body),
@@ -292,6 +303,13 @@ export const endpoints = {
     api.post<{ session: InteractiveSession }>(
       `/api/interactive-sessions/${encodeURIComponent(id)}/actions`,
       { action },
+    ),
+  // Purge finished (stopped/expired/failed) sessions. No ids = clear all the
+  // caller can manage. Returns the fresh state plus which ids were removed.
+  cleanupSessions: (ids?: string[]) =>
+    api.post<{ state: unknown; removedIds: string[] }>(
+      "/api/interactive-sessions/cleanup",
+      ids && ids.length ? { ids } : {},
     ),
   sharedSession: (id: string, token: string) =>
     api.get<{ session: InteractiveSession }>(

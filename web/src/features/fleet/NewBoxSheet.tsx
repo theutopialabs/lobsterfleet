@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
-import { SESSION_RUNTIME_OPTIONS } from "../../lib/format";
+import { SESSION_RUNTIME_OPTIONS, runtimeLabel } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button } from "../../components/Button";
 import { Field, Input, Select, TextArea } from "../../components/Field";
@@ -17,18 +17,28 @@ export function NewBoxSheet({
   onClose: () => void;
   repos: string[];
 }) {
-  const { refresh, toast } = useStore();
+  const { state, refresh, toast } = useStore();
   const [repo, setRepo] = useState("");
   const [branch, setBranch] = useState("main");
   const [runtime, setRuntime] = useState<string>("crabbox");
+  const [size, setSize] = useState("");
   const [command, setCommand] = useState("codex --yolo");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Box sizes come from the server (env-overridable), so we render whatever it
+  // sends instead of baking a list into the UI.
+  const sizes = state?.sizes ?? [];
 
   // default the repo once the list arrives
   useEffect(() => {
     if (open && !repo && repos[0]) setRepo(repos[0]);
   }, [open, repo, repos]);
+
+  // default the size to the server's pick once state arrives
+  useEffect(() => {
+    if (open && !size && state) setSize(state.defaultSize || sizes[0]?.id || "");
+  }, [open, size, state, sizes]);
 
   const submit = async () => {
     if (!repo) {
@@ -37,7 +47,14 @@ export function NewBoxSheet({
     }
     setBusy(true);
     try {
-      await endpoints.createSession({ repo, branch, runtime, command, prompt: prompt || undefined });
+      await endpoints.createSession({
+        repo,
+        branch,
+        runtime,
+        size: size || undefined,
+        command,
+        prompt: prompt || undefined,
+      });
       toast("Crabbox requested. Provisioning through the broker.");
       onClose();
       await refresh();
@@ -67,26 +84,38 @@ export function NewBoxSheet({
       }
     >
       <div className="flex flex-col gap-5">
-        <Field label="Repo">
-          <Select value={repo} onChange={(e) => setRepo(e.target.value)}>
-            {repos.length === 0 && <option value="">No repos allowlisted</option>}
-            {repos.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </Select>
-        </Field>
-
         <div className="grid grid-cols-2 gap-4">
+          <Field label="Repo">
+            <Select value={repo} onChange={(e) => setRepo(e.target.value)}>
+              {repos.length === 0 && <option value="">No repos allowlisted</option>}
+              {repos.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </Select>
+          </Field>
           <Field label="Branch">
             <Input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" />
           </Field>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
           <Field label="Runtime">
             <Select value={runtime} onChange={(e) => setRuntime(e.target.value)}>
               {SESSION_RUNTIME_OPTIONS.map((r) => (
                 <option key={r} value={r}>
-                  {r === "crabbox" ? "Crabbox (VNC)" : "Container"}
+                  {runtimeLabel(r)}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Size">
+            <Select value={size} onChange={(e) => setSize(e.target.value)}>
+              {sizes.length === 0 && <option value="">Default</option>}
+              {sizes.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
                 </option>
               ))}
             </Select>

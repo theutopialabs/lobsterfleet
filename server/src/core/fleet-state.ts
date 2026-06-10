@@ -8,7 +8,7 @@ export type FleetStatus =
   | "expired"
   | "failed";
 
-export type FleetRuntime = "crabbox" | "container";
+export type FleetRuntime = "crabbox" | "crabbox-gui" | "container";
 
 export type FleetSessionInput = {
   id: string;
@@ -146,10 +146,11 @@ export function buildFleetState(
     FleetStatus,
     number
   >;
-  const byRuntime: Record<FleetRuntime, number> = { crabbox: 0, container: 0 };
+  const byRuntime: Record<FleetRuntime, number> = { crabbox: 0, "crabbox-gui": 0, container: 0 };
   for (const session of sessionSummaries) {
     byStatus[session.status] += 1;
-    byRuntime[session.runtime] += 1;
+    // Guard unknown runtimes so a stray value can't NaN the whole count.
+    byRuntime[session.runtime] = (byRuntime[session.runtime] ?? 0) + 1;
   }
 
   return {

@@ -5,7 +5,7 @@ import { motion } from "framer-motion";
 import { useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { Card, Lane } from "../../lib/api";
-import { elapsed, firstLine, mergePolicyLabel } from "../../lib/format";
+import { elapsed, firstLine, mergePolicyLabel, runtimeLabel } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button } from "../../components/Button";
 import { Chip, StatePill } from "../../components/Pill";
@@ -84,7 +84,7 @@ export function CardTile({
       <div className="mt-3 flex flex-wrap gap-1.5">
         <Chip mono>{card.id}</Chip>
         <Chip>{card.repo.split("/").pop()}</Chip>
-        <Chip>{card.runtime}</Chip>
+        <Chip>{runtimeLabel(card.runtime)}</Chip>
         <Chip>{mergePolicyLabel(card.policy)}</Chip>
         {card.run && <Chip mono>{card.run.id}</Chip>}
       </div>

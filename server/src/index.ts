@@ -23,6 +23,7 @@ import {
   TerminalMessageType,
 } from "./core/terminal-protocol.js";
 import { attachSshBridge } from "./crabbox/sshBridge.js";
+import { attachVncBridge } from "./crabbox/vncBridge.js";
 import { parseSshAttachUrl } from "./crabbox/provision.js";
 import {
   coordinatorLeaseIdFromSessionLease,
@@ -376,6 +377,40 @@ function isTerminalUpgrade(pathname: string): boolean {
   );
 }
 
+// The VNC viewer ws: /api/interactive-sessions/{id}/vnc. Raw RFB, no framing.
+function vncSessionIdFromPath(pathname: string): string | null {
+  const m = pathname.match(/^\/api\/interactive-sessions\/([^/]+)\/vnc$/);
+  return m ? decodeURIComponent(m[1] as string) : null;
+}
+
+// Bridges a raw ws to the box desktop behind sessionId. Unlike the terminal
+// bridge this speaks RFB straight away, so no welcome/subscribe frames.
+async function bridgeVncSession(ws: WebSocket, sessionId: string): Promise<void> {
+  const target = await lookupSessionTarget(sessionId);
+  const parsed = target ? parseSshAttachUrl(target.attachUrl) : null;
+  if (!parsed) {
+    // Nothing to speak RFB to, so just close. The viewer surfaces the failure.
+    try {
+      ws.close(1011, "no desktop for this session");
+    } catch {
+      // already closing
+    }
+    return;
+  }
+  const leaseId = target!.leaseId;
+  attachVncBridge(
+    ws,
+    { host: parsed.host, port: parsed.port, user: parsed.user, privateKeyPath: SSH_KEY_PATH },
+    {
+      knownHostKey: leaseId ? knownHosts.get(leaseId) : null,
+      onLearnHostKey: leaseId ? (hash) => knownHosts.set(leaseId, hash) : undefined,
+      onReady: () => console.log(`[lobsterfleet] vnc bridge up for ${sessionId} -> ${parsed.host}`),
+      onClose: () => console.log(`[lobsterfleet] vnc bridge closed for ${sessionId}`),
+      onError: (msg) => console.warn(`[lobsterfleet] vnc bridge ${sessionId}: ${msg}`),
+    },
+  );
+}
+
 // Pulls the session id out of /api/interactive-sessions/{id}/pty style paths.
 function sessionIdFromPath(pathname: string): string | null {
   const m = pathname.match(/^\/api\/interactive-sessions\/([^/]+)\/(?:pty|terminal)$/);
@@ -414,7 +449,8 @@ function rejectUpgrade(socket: import("node:stream").Duplex, status: number, rea
 server.on("upgrade", (req, socket, head) => {
   void (async () => {
     const pathname = requestUrl(req).pathname;
-    if (!isTerminalUpgrade(pathname)) {
+    const vncSessionId = vncSessionIdFromPath(pathname);
+    if (!isTerminalUpgrade(pathname) && !vncSessionId) {
       socket.destroy();
       return;
     }
@@ -425,6 +461,20 @@ server.on("upgrade", (req, socket, head) => {
         "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 29\r\n\r\ncross-origin request blocked\n",
       );
       socket.destroy();
+      return;
+    }
+
+    // VNC viewer: authorize like a terminal takeover, then hand the raw ws to the
+    // desktop bridge. No welcome/subscribe frames, the bridge speaks RFB.
+    if (vncSessionId) {
+      const auth = await authorizeBridgeRequest(request, vncSessionId, "control");
+      if (!auth.ok) {
+        rejectUpgrade(socket, auth.status, auth.reason);
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        void bridgeVncSession(ws, vncSessionId);
+      });
       return;
     }
     // Path-addressed terminals name the session up front, so authorize BEFORE

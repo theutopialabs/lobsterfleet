@@ -6,7 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { Card, RuntimeCapabilities } from "../../lib/api";
-import { diffStatusChar, elapsed, mergePolicyLabel } from "../../lib/format";
+import { diffStatusChar, elapsed, mergePolicyLabel, runtimeLabel } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button, IconButton } from "../../components/Button";
 import { Chip, StatePill } from "../../components/Pill";
@@ -77,7 +77,7 @@ export function RunDrawer({ card, onClose }: { card: Card | null; onClose: () =>
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <Chip mono>{card.id}</Chip>
                   <Chip>{card.repo}</Chip>
-                  <Chip>{card.runtime}</Chip>
+                  <Chip>{runtimeLabel(card.runtime)}</Chip>
                   <Chip>{mergePolicyLabel(card.policy)}</Chip>
                   {run && <Chip mono>{run.id}</Chip>}
                 </div>

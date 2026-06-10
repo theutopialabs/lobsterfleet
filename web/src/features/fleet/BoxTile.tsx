@@ -5,7 +5,13 @@ import { motion } from "framer-motion";
 import { useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { InteractiveSession } from "../../lib/api";
-import { elapsed, runtimeHasVnc, sessionIsActive, sessionStatusLabel } from "../../lib/format";
+import {
+  elapsed,
+  runtimeHasVnc,
+  runtimeLabel,
+  sessionIsActive,
+  sessionStatusLabel,
+} from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button } from "../../components/Button";
 import { Chip, StatePill } from "../../components/Pill";
@@ -74,7 +80,7 @@ export function BoxTile({
       <div className="flex flex-wrap gap-1.5">
         <Chip mono>{session.id}</Chip>
         <Chip>⎇ {session.branch}</Chip>
-        <Chip>{session.runtime}</Chip>
+        <Chip>{runtimeLabel(session.runtime)}</Chip>
         {session.multiplayerMode && <Chip>multiplayer</Chip>}
       </div>
 

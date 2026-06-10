@@ -17,6 +17,8 @@ import { resolveRuntimePath } from "../runtimePaths.js";
 export type ProvisionEnv = BrokerEnv &
   CodexAuthEnv & {
     CRABBOX_SSH_PRIVATE_KEY_PATH?: string;
+    // Which desktop env GUI leases start (xfce, gnome, ...). Defaults to xfce.
+    CRABBOX_COORDINATOR_DESKTOP_ENV?: string;
   };
 
 export type ProvisionResult = {
@@ -33,11 +35,28 @@ export type ProvisionResult = {
 export type CrabboxSessionLike = {
   id: string;
   owner?: string;
+  // The chosen runtime, so we know whether to lease a desktop (GUI) box or a
+  // headless (TUI) one. Defaults to headless when missing.
+  runtime?: string;
+  // Box size class (standard/fast/large/beast). Empty = install default.
+  size?: string;
 };
 
 // True when the broker creds are present, so we should take the real path.
 export function crabboxConfigured(env: BrokerEnv): boolean {
   return Boolean(env.CRABBOX_COORDINATOR_URL && env.CRABBOX_COORDINATOR_TOKEN);
+}
+
+// Both crabbox runtimes lease a real box. "crabbox" is the headless TUI box,
+// "crabbox-gui" adds a graphical desktop. Everything else (ssh bridge, codex
+// bootstrap, heartbeat) is identical, so the gates use this to treat both alike.
+export function isCrabboxRuntime(runtime: string | null | undefined): boolean {
+  return runtime === "crabbox" || runtime === "crabbox-gui";
+}
+
+// Only the GUI runtime wants a desktop attached to the lease.
+export function crabboxWantsDesktop(runtime: string | null | undefined): boolean {
+  return runtime === "crabbox-gui";
 }
 
 function slugFor(id: string): string {
@@ -56,9 +75,16 @@ export async function provisionCrabbox(
   env: ProvisionEnv,
   session: CrabboxSessionLike,
 ): Promise<ProvisionResult> {
+  const wantsDesktop = crabboxWantsDesktop(session.runtime);
   let lease: Lease;
   try {
-    lease = await createLease(env, { requestedSlug: slugFor(session.id), owner: session.owner });
+    lease = await createLease(env, {
+      requestedSlug: slugFor(session.id),
+      owner: session.owner,
+      desktop: wantsDesktop,
+      desktopEnv: env.CRABBOX_COORDINATOR_DESKTOP_ENV || "xfce",
+      ...(session.size ? { class: session.size } : {}),
+    });
   } catch (error) {
     return {
       status: "failed",
@@ -106,14 +132,25 @@ export async function provisionCrabbox(
       hostKey = codex.hostKey;
     }
 
+    // GUI leases get a desktop. We serve it ourselves over an ssh-tunneled noVNC
+    // bridge, so point at our own same-origin viewer route (no broker portal /
+    // second login). null when this is a TUI lease or the box came up headless.
+    const desktopUp = wantsDesktop && active.desktop !== false;
+    const vncUrl = desktopUp ? `/vnc/${encodeURIComponent(session.id)}` : null;
+    const desktopNote = wantsDesktop
+      ? desktopUp
+        ? " · desktop ready"
+        : " · desktop requested but lease came back headless"
+      : "";
+
     return {
       status: "ready",
       leaseId: lease.id,
       attachUrl,
-      vncUrl: active.desktop ? `${attachUrl}#vnc` : null,
+      vncUrl,
       message: reachable
-        ? `crabbox ${active.slug || lease.id} ready at ${active.host} · ${codexNote}`
-        : `crabbox ${active.slug || lease.id} up at ${active.host}, ssh still warming up`,
+        ? `crabbox ${active.slug || lease.id} ready at ${active.host} · ${codexNote}${desktopNote}`
+        : `crabbox ${active.slug || lease.id} up at ${active.host}, ssh still warming up${desktopNote}`,
       hostKey,
     };
   } catch (error) {

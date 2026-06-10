@@ -17,6 +17,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // noVNC 1.7 ships top-level await, so target a baseline that allows it
+    // (Chrome 89+, Safari 15+, Firefox 89+). Fine for this modern-only UI.
+    target: "es2022",
     rollupOptions: {
       output: {
         manualChunks(id) {

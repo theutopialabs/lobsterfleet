@@ -17,10 +17,15 @@ import { SessionTile } from "./features/sessions/SessionTile";
 import { AdminView } from "./features/admin/AdminView";
 import { SettingsView } from "./features/settings/SettingsView";
 import { SignIn } from "./features/SignIn";
+import { VncViewerPage } from "./features/sessions/VncViewerPage";
 
 export function App() {
   const sharedRoute = sharedSessionRoute(window.location);
   if (sharedRoute) return <SharedSessionPage id={sharedRoute.id} token={sharedRoute.token} />;
+
+  // Standalone desktop viewer tab. Auth rides the same-origin cookie on the ws.
+  const vnc = vncRoute(window.location);
+  if (vnc) return <VncViewerPage id={vnc.id} />;
 
   return (
     <StoreProvider>
@@ -79,6 +84,11 @@ function sharedSessionRoute(location: Location): { id: string; token: string } |
   const token = new URLSearchParams(location.search).get("token") ?? "";
   if (!token) return null;
   return { id: decodeURIComponent(match[1] ?? ""), token };
+}
+
+function vncRoute(location: Location): { id: string } | null {
+  const match = location.pathname.match(/^\/vnc\/([^/]+)$/);
+  return match ? { id: decodeURIComponent(match[1] ?? "") } : null;
 }
 
 function sectionFromPath(pathname: string): Section {

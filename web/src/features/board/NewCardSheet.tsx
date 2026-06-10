@@ -8,6 +8,7 @@ import {
   MERGE_POLICY_OPTIONS,
   RUNTIME_OPTIONS,
   mergePolicyLabel,
+  runtimeLabel,
 } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button } from "../../components/Button";
@@ -140,7 +141,7 @@ export function NewCardSheet({
             <Select value={runtime} onChange={(e) => setRuntime(e.target.value)}>
               {RUNTIME_OPTIONS.map((r) => (
                 <option key={r} value={r}>
-                  {r}
+                  {runtimeLabel(r)}
                 </option>
               ))}
             </Select>

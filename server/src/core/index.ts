@@ -15,13 +15,7 @@ import {
 // Node dropped the Cloudflare sandbox runtime. We keep its types so old guarded
 // paths still compile, while runtime values come from local stubs. Terminals use
 // the ssh2 bridge to leased crabboxes.
-import type {
-  BackupOptions,
-  DirectoryBackup,
-  Sandbox as CloudflareSandbox,
-  SessionTerminatedError as CloudflareSandboxSessionError,
-} from "@cloudflare/sandbox";
-import { ContainerProxy, getSandbox } from "./cf-runtime";
+import type { DirectoryBackup, Sandbox as CloudflareSandbox } from "@cloudflare/sandbox";
 import {
   TerminalMessageType,
   decodeTerminalFrame,
@@ -37,7 +31,13 @@ import {
   type TerminalInputState,
 } from "./terminal-multiplayer";
 import { buildFleetState, type FleetSandboxPolicySummary, type FleetState } from "./fleet-state";
-import { crabboxConfigured, provisionCrabbox, type ProvisionEnv } from "../crabbox/provision";
+import {
+  crabboxConfigured,
+  crabboxWantsDesktop,
+  isCrabboxRuntime,
+  provisionCrabbox,
+  type ProvisionEnv,
+} from "../crabbox/provision";
 import {
   coordinatorLeaseIdFromSessionLease,
   releaseLease,
@@ -84,10 +84,6 @@ export type RuntimeEnv = Env & {
   CRABBOX_RUNTIME_PROVISION_TOKEN?: string;
   CRABBOX_CLOUDFLARE_RUNNER_URL?: string;
   CRABBOX_CLOUDFLARE_RUNNER_TOKEN?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_WORKDIR?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_TTL_SECONDS?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_IDLE_SECONDS?: string;
   CRABBOX_PTY_BRIDGE_URL?: string;
   CRABBOX_PTY_BRIDGE_TOKEN?: string;
   CRABBOX_CLAWFLEET_URL?: string;
@@ -98,6 +94,7 @@ export type RuntimeEnv = Env & {
   CRABBOX_COORDINATOR_PUBLIC_URL?: string;
   CRABBOX_COORDINATOR_PROVIDER?: string;
   CRABBOX_COORDINATOR_CLASS?: string;
+  CRABBOX_SIZE_CLASSES?: string;
   CRABBOX_COORDINATOR_SERVER_TYPE?: string;
   CRABBOX_COORDINATOR_LOCATION?: string;
   CRABBOX_COORDINATOR_PROVIDER_KEY?: string;
@@ -120,7 +117,6 @@ export type RuntimeEnv = Env & {
   CRABBOX_TOKEN_ENCRYPTION_KEY?: string;
   BACKUP_BUCKET_NAME?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
-  LOBSTERFLEET_LOCAL_SANDBOX_BACKUPS?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   OPENAI_ORG_ID?: string;
@@ -128,7 +124,6 @@ export type RuntimeEnv = Env & {
   R2_SECRET_ACCESS_KEY?: string;
 };
 
-const sandboxPlaceholderOpenAIKey = "lobsterfleet-worker-injected";
 const sandboxPlaceholderGitHubToken = "lobsterfleet-worker-injected";
 
 type SandboxOutboundContext = {
@@ -144,8 +139,6 @@ type SandboxOutboundHandler = (
 // The Sandbox container class is gone. sandboxOutbound is kept for old guarded
 // paths, but the Node host does not wire container interception.
 void sandboxOutbound;
-
-export { ContainerProxy };
 
 type User = {
   subject: string;
@@ -239,7 +232,7 @@ type RuntimePreflight = {
 };
 
 type RuntimeDescriptor = {
-  runtime: "container" | "crabbox";
+  runtime: "crabbox" | "crabbox-gui";
   reason: string;
   capabilities: RuntimeCapabilities;
 };
@@ -322,7 +315,7 @@ type InteractiveSession = {
   rootSessionId: string | null;
   repo: string;
   branch: string;
-  runtime: "crabbox" | "container";
+  runtime: "crabbox" | "crabbox-gui";
   command: string;
   prompt: string;
   purpose: string;
@@ -379,23 +372,20 @@ type InteractiveSessionEventRow = {
   created_at: number;
 };
 
-type SandboxRuntimeSession = (InteractiveProvisionRequest | InteractiveSession) & {
-  githubToken?: string;
-};
-
 type InteractiveProvisionRequest = {
   id: string;
   parentSessionId: string | null;
   rootSessionId: string | null;
   repo: string;
   branch: string;
-  runtime: "crabbox" | "container";
+  runtime: "crabbox" | "crabbox-gui";
   command: string;
   prompt: string;
   purpose: string;
   summary: string;
   owner: string;
   createdBy: string;
+  size?: string;
   githubToken?: string;
 };
 
@@ -463,22 +453,12 @@ export type TerminalBridgeAuthorization =
   | { ok: true; canInput: boolean }
   | { ok: false; status: number; reason: string };
 
-type SandboxExecutionSession = Awaited<ReturnType<CloudflareSandbox["createSession"]>>;
-type SandboxSessionTarget = Pick<SandboxExecutionSession, "exec" | "mkdir" | "setEnvVars">;
 
 type ClawFleetInstancePayload = {
   name?: string;
   status?: string;
   novnc_port?: number;
   gateway_port?: number;
-};
-
-type CloudflareSandboxPayload = {
-  id?: string;
-  state?: string;
-  workdir?: string;
-  instanceType?: string;
-  labels?: Record<string, string>;
 };
 
 type ChangedFile = {
@@ -585,7 +565,7 @@ type InteractiveSessionTable = {
   root_session_id: string | null;
   repo: string;
   branch: string;
-  runtime: "crabbox" | "container";
+  runtime: "crabbox" | "crabbox-gui";
   command: string;
   prompt: string;
   purpose: string;
@@ -713,13 +693,11 @@ const bootstrapSessionSeconds = 60 * 60;
 // cookie does not keep removed users in. 15m forced re-login mid-session.
 const githubSessionSeconds = 60 * 60 * 12;
 const sshLinkSeconds = 5 * 60;
-const terminalClipboardMaxBytes = 10 * 1024 * 1024;
 const lanes = ["Todo", "Running", "Human Review", "Done"];
 const preferredRepo = "openclaw/crabfleet";
 const defaultAppPublicUrl = "http://localhost:8088";
 const defaultAppRedirectHosts = new Set<string>();
 const sandboxLeasePrefix = "sandbox:";
-const sandboxLeaseProfile = "autostart-v4";
 const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
 const interactiveSessionStatuses: readonly InteractiveSessionStatus[] = [
   "provisioning",
@@ -737,19 +715,43 @@ const deadInteractiveSessionStatuses: readonly InteractiveSessionStatus[] = [
   "failed",
 ];
 const roleOptions = new Set<Role>(["viewer", "maintainer", "owner"]);
-const runtimeOptions = ["auto", "container", "crabbox"] as const;
+const runtimeOptions = ["auto", "crabbox", "crabbox-gui"] as const;
+// Box size classes the broker understands. crabbox has no live catalog endpoint,
+// so the list lives here and can be overridden per-install via CRABBOX_SIZE_CLASSES
+// (comma list) with no rebuild. Labels are cosmetic - the broker maps the class
+// id to real hardware when it leases.
+const sizeClassLabels: Record<string, string> = {
+  standard: "Standard",
+  fast: "Fast",
+  large: "Large",
+  beast: "Beast",
+};
+const defaultSizeClasses = ["standard", "fast", "large", "beast"] as const;
+type SizeOption = { id: string; label: string };
+
+function crabboxSizeOptions(env: RuntimeEnv): SizeOption[] {
+  const configured = clean(env.CRABBOX_SIZE_CLASSES, 200)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const ids = configured.length ? configured : [...defaultSizeClasses];
+  return ids.map((id) => ({ id, label: sizeClassLabels[id] ?? id }));
+}
+
+// Default size: the install default class if it's in the menu, else the first option.
+function defaultSizeClass(env: RuntimeEnv): string {
+  const options = crabboxSizeOptions(env);
+  const installDefault = clean(env.CRABBOX_COORDINATOR_CLASS, 80).trim();
+  if (installDefault && options.some((option) => option.id === installDefault)) {
+    return installDefault;
+  }
+  return options[0]?.id ?? "standard";
+}
 const mergePolicyOptions = ["open_pr", "merge_when_green", "fix_until_green_and_merge"] as const;
 const defaultStallMs = 5 * 60 * 1000;
 const workflowCacheMs = 60 * 60 * 1000;
-const containerCapabilities: RuntimeCapabilities = {
-  terminal: true,
-  takeover: false,
-  vnc: false,
-  desktop: false,
-  logs: true,
-  artifacts: true,
-};
-const crabboxCapabilities: RuntimeCapabilities = {
+// GUI crabbox: full graphical box, so vnc + desktop are on.
+const crabboxGuiCapabilities: RuntimeCapabilities = {
   terminal: true,
   takeover: true,
   vnc: true,
@@ -757,6 +759,22 @@ const crabboxCapabilities: RuntimeCapabilities = {
   logs: true,
   artifacts: true,
 };
+// TUI crabbox: same real box and takeover, but headless (no desktop to view).
+const crabboxTuiCapabilities: RuntimeCapabilities = {
+  terminal: true,
+  takeover: true,
+  vnc: false,
+  desktop: false,
+  logs: true,
+  artifacts: true,
+};
+
+// Picks the capability set for a runtime token. Unknown tokens fall back to the
+// headless TUI box (the safe, terminal-only baseline).
+function capabilitiesForRuntime(runtime: string): RuntimeCapabilities {
+  if (runtime === "crabbox-gui") return crabboxGuiCapabilities;
+  return crabboxTuiCapabilities;
+}
 
 // Node port: the D1 dialect is gone. database(env) hands back the node:sqlite
 // Kysely instance the Node entry opened at boot (see server/src/index.ts and
@@ -1332,36 +1350,6 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     );
   }
 
-  const sshInteractiveCheckpointsMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/checkpoints$/,
-  );
-  if (sshInteractiveCheckpointsMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    const id = decodeURIComponent(sshInteractiveCheckpointsMatch[1] ?? "");
-    if (request.method === "GET")
-      return json(await listInteractiveSessionCheckpoints(env, user, id));
-    if (request.method === "POST") {
-      return json(await checkpointInteractiveSession(env, user, id), { status: 201 });
-    }
-  }
-
-  const sshInteractiveRestoreMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/checkpoints\/([^/]+)\/restore$/,
-  );
-  if (request.method === "POST" && sshInteractiveRestoreMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    return json(
-      await restoreInteractiveSessionCheckpoint(
-        env,
-        user,
-        decodeURIComponent(sshInteractiveRestoreMatch[1] ?? ""),
-        decodeURIComponent(sshInteractiveRestoreMatch[2] ?? ""),
-      ),
-    );
-  }
-
   const sshInteractiveLogsMatch = url.pathname.match(
     /^\/api\/ssh\/interactive-sessions\/([^/]+)\/logs$/,
   );
@@ -1568,48 +1556,6 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     );
   }
 
-  const interactiveSessionDiagnosticsMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/diagnostics$/,
-  );
-  if (request.method === "GET" && interactiveSessionDiagnosticsMatch) {
-    requireRole(user, "viewer");
-    return json(
-      await readInteractiveSessionDiagnostics(
-        env,
-        user,
-        decodeURIComponent(interactiveSessionDiagnosticsMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const interactiveSessionCheckpointsMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/checkpoints$/,
-  );
-  if (interactiveSessionCheckpointsMatch) {
-    requireRole(user, "viewer");
-    const id = decodeURIComponent(interactiveSessionCheckpointsMatch[1] ?? "");
-    if (request.method === "GET")
-      return json(await listInteractiveSessionCheckpoints(env, user, id));
-    if (request.method === "POST") {
-      return json(await checkpointInteractiveSession(env, user, id), { status: 201 });
-    }
-  }
-
-  const interactiveSessionRestoreMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/checkpoints\/([^/]+)\/restore$/,
-  );
-  if (request.method === "POST" && interactiveSessionRestoreMatch) {
-    requireRole(user, "viewer");
-    return json(
-      await restoreInteractiveSessionCheckpoint(
-        env,
-        user,
-        decodeURIComponent(interactiveSessionRestoreMatch[1] ?? ""),
-        decodeURIComponent(interactiveSessionRestoreMatch[2] ?? ""),
-      ),
-    );
-  }
-
   const interactiveSessionMatch = url.pathname.match(
     /^\/api\/interactive-sessions\/([^/]+)\/actions$/,
   );
@@ -1636,22 +1582,6 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
       env,
       user,
       decodeURIComponent(interactivePtyMatch[1] ?? ""),
-    );
-  }
-
-  const interactiveClipboardMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/clipboard$/,
-  );
-  if (request.method === "POST" && interactiveClipboardMatch) {
-    requireRole(user, "viewer");
-    return json(
-      await uploadInteractiveSessionClipboard(
-        request,
-        env,
-        user,
-        decodeURIComponent(interactiveClipboardMatch[1] ?? ""),
-      ),
-      { status: 201 },
     );
   }
 
@@ -2514,6 +2444,8 @@ async function readState(
     cards,
     interactiveSessions,
     fleet,
+    sizes: crabboxSizeOptions(env),
+    defaultSize: defaultSizeClass(env),
     ...(user.role === "owner" ? { preflight: env.__preflight ?? null } : {}),
   };
 }
@@ -2566,6 +2498,7 @@ async function createInteractiveSessionFromInput(
     repo?: string;
     branch?: string;
     runtime?: string;
+    size?: string;
     command?: string;
     prompt?: string;
     parentSessionId?: string;
@@ -2585,9 +2518,14 @@ async function createInteractiveSessionFromInput(
   if (!repo) throw badRequest("repo is required");
   await requireRepo(env, repo);
   const branch = clean(body.branch, 120) || "main";
-  const runtime = oneOf(body.runtime, ["crabbox", "container"], "container") as
+  const runtime = oneOf(body.runtime, ["crabbox", "crabbox-gui"], "crabbox") as
     | "crabbox"
-    | "container";
+    | "crabbox-gui";
+  const size = oneOf(
+    body.size,
+    crabboxSizeOptions(env).map((option) => option.id),
+    defaultSizeClass(env),
+  );
   const command = interactiveCommand(body.command);
   const prompt = clean(body.prompt, 4000);
   const purpose = interactiveSessionPurpose(body.purpose, prompt, repo, branch, command);
@@ -2653,6 +2591,7 @@ async function createInteractiveSessionFromInput(
           repo,
           branch,
           runtime,
+          size,
           command,
           prompt,
           purpose,
@@ -3308,40 +3247,6 @@ async function interactiveTerminalHub(
   return new Response(null, { status: 101, webSocket: client });
 }
 
-async function writeTerminalClipboardFile(
-  env: RuntimeEnv,
-  user: User,
-  session: InteractiveSession,
-  bytes: Uint8Array,
-  rawName: unknown,
-  rawMediaType: unknown,
-): Promise<{ path: string; name: string; mediaType: string; byteCount: number }> {
-  if (!session.leaseId?.startsWith(sandboxLeasePrefix) || !env.SANDBOX) {
-    throw serviceUnavailable("clipboard file paste requires a Cloudflare Sandbox session");
-  }
-  if (!bytes.byteLength || bytes.byteLength > terminalClipboardMaxBytes) {
-    throw badRequest(
-      `clipboard file exceeds ${Math.floor(terminalClipboardMaxBytes / 1024 / 1024)} MiB`,
-    );
-  }
-  const mediaType = clean(rawMediaType || "application/octet-stream", 120);
-  const name = safeClipboardFilename(rawName, mediaType);
-  const lease = sandboxLeaseInfo(session);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-  const directory = `${sandboxWorkdir(session.id)}/.crabbox/clipboard`;
-  const path = `${directory}/${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${name}`;
-  await sandbox.mkdir(directory, { recursive: true });
-  await sandbox.writeFile(path, base64FromBytes(bytes), { encoding: "base64" });
-  await appendInteractiveSessionEvent(
-    env,
-    session.id,
-    user,
-    `Clipboard file pasted: ${path}`,
-    Date.now(),
-  );
-  return { path, name, mediaType, byteCount: bytes.byteLength };
-}
-
 async function subscribeTerminalHubSession(
   request: Request,
   env: RuntimeEnv,
@@ -3539,39 +3444,6 @@ async function openInteractiveTerminalUpstream(
   rows: number,
 ): Promise<TerminalUpstream> {
   const now = Date.now();
-  if (session.leaseId?.startsWith(sandboxLeasePrefix) && env.SANDBOX) {
-    const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
-    const sandboxSession = await ensureCurrentSandboxLease(request, env, user, runtimeSession);
-    const lease = sandboxLeaseInfo(sandboxSession);
-    const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-    const upstreamResponse = await openSandboxTerminalResponse(
-      request,
-      env,
-      sandbox,
-      sandboxSession,
-      {
-        cols,
-        rows,
-      },
-    );
-    const upstream = upstreamResponse.webSocket;
-    if (!upstream || upstreamResponse.status !== 101) {
-      throw serviceUnavailable(`Cloudflare Sandbox terminal HTTP ${upstreamResponse.status}`);
-    }
-    upstream.accept();
-    return {
-      socket: upstream,
-      markConnected: () =>
-        markInteractiveTerminalConnected(
-          env,
-          user,
-          sandboxSession.id,
-          now,
-          "Cloudflare Sandbox terminal connected",
-        ),
-    };
-  }
-
   const target = interactiveTerminalTarget(env, session);
   if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
   const upstreamResponse = await fetch(
@@ -3680,48 +3552,6 @@ async function markInteractiveTerminalUnavailable(
     });
   }
   await appendInteractiveSessionLog(env, id, user, message, now);
-}
-
-async function uploadInteractiveSessionClipboard(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ path: string; name: string; mediaType: string; byteCount: number }> {
-  if (!(await canControlInteractiveSessionById(env, user, id))) {
-    throw forbidden("terminal control has not been granted");
-  }
-  const session = await readInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  if (["expired", "failed", "stopped"].includes(session.status)) {
-    throw badRequest(`session is ${session.status}`);
-  }
-  const bytes = await readClipboardUploadBytes(request);
-  return writeTerminalClipboardFile(
-    env,
-    user,
-    session,
-    bytes,
-    decodeHeaderValue(request.headers.get("x-clipboard-name")),
-    request.headers.get("content-type") || "application/octet-stream",
-  );
-}
-
-async function readClipboardUploadBytes(request: Request): Promise<Uint8Array> {
-  const contentLength = Number(request.headers.get("content-length") || "0");
-  if (Number.isFinite(contentLength) && contentLength > terminalClipboardMaxBytes) {
-    throw badRequest(
-      `clipboard file exceeds ${Math.floor(terminalClipboardMaxBytes / 1024 / 1024)} MiB`,
-    );
-  }
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (!bytes.byteLength) throw badRequest("clipboard file is empty");
-  if (bytes.byteLength > terminalClipboardMaxBytes) {
-    throw badRequest(
-      `clipboard file exceeds ${Math.floor(terminalClipboardMaxBytes / 1024 / 1024)} MiB`,
-    );
-  }
-  return bytes;
 }
 
 function terminalInputGrant(
@@ -3872,16 +3702,6 @@ async function interactiveSessionPty(
   }
   const canManage = canManageInteractiveSession(user, session);
 
-  if (session.leaseId?.startsWith(sandboxLeasePrefix) && env.SANDBOX) {
-    return interactiveSandboxTerminal(
-      request,
-      env,
-      user,
-      session,
-      canManage ? undefined : () => canControlInteractiveSessionById(env, user, id),
-    );
-  }
-
   const target = interactiveTerminalTarget(env, session);
   if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
 
@@ -3929,348 +3749,6 @@ async function interactiveSessionPty(
   await appendInteractiveSessionEvent(env, id, user, "PTY terminal connected", now);
 
   return new Response(null, { status: 101, webSocket: client });
-}
-
-async function interactiveSandboxTerminal(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-  session: InteractiveSession,
-  canSendLeft?: () => Promise<boolean>,
-): Promise<Response> {
-  if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
-  const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
-  const sandboxSession = await ensureCurrentSandboxLease(request, env, user, runtimeSession);
-  const lease = sandboxLeaseInfo(sandboxSession);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-  const upstreamResponse = await openSandboxTerminalResponse(
-    request,
-    env,
-    sandbox,
-    sandboxSession,
-    {
-      cols: terminalSize(request, "cols", 120),
-      rows: terminalSize(request, "rows", 34),
-    },
-  );
-  const upstream = upstreamResponse.webSocket;
-  if (!upstream || upstreamResponse.status !== 101) {
-    await markInteractiveTerminalUnavailable(
-      env,
-      user,
-      sandboxSession.id,
-      Date.now(),
-      `terminal unavailable: Cloudflare Sandbox terminal HTTP ${upstreamResponse.status}`,
-    );
-    return upstreamResponse;
-  }
-
-  const pair = new WebSocketPair();
-  const client = pair[0];
-  const server = pair[1];
-  server.accept();
-  upstream.accept();
-  await markInteractiveTerminalConnected(
-    env,
-    user,
-    sandboxSession.id,
-    Date.now(),
-    "Cloudflare Sandbox terminal connected",
-  );
-  bridgeWebSockets(server, upstream, canSendLeft);
-  return new Response(null, { status: 101, webSocket: client });
-}
-
-async function readInteractiveSessionDiagnostics(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ session: InteractiveSession; diagnostics: unknown }> {
-  const session = await readInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  const decoratedSession = decorateInteractiveSession(session, user, env);
-  if (
-    !canControlInteractiveSession(user, session, Date.now(), canGrantDelegatedControl(env, session))
-  ) {
-    throw forbidden("terminal control has not been granted");
-  }
-  if (!env.SANDBOX || !session.leaseId?.startsWith(sandboxLeasePrefix)) {
-    return {
-      session: decoratedSession,
-      diagnostics: {
-        available: false,
-        reason: "diagnostics are only available for Cloudflare Sandbox sessions",
-      },
-    };
-  }
-
-  const lease = sandboxLeaseInfo(session);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-  const workdir = sandboxWorkdir(session.id);
-  const setup = await createSandboxSession(
-    sandbox,
-    sandboxSetupSessionId(session.id),
-    "/workspace",
-    {
-      CRABBOX_SESSION_ID: session.id,
-      CRABBOX_WORKDIR: workdir,
-    },
-  );
-  const result = await setup.exec(
-    `
-node - <<'NODE'
-const fs = require("fs");
-const cp = require("child_process");
-const tools = [
-  "bash", "git", "gh", "node", "npm", "pnpm", "codex", "rg", "fd", "jq",
-  "python3", "pip3", "make", "gcc", "time", "ssh", "rsync", "curl",
-  "unzip", "zip", "sqlite3", "shellcheck", "crabbox"
-];
-const workdir = process.env.CRABBOX_WORKDIR || "";
-const repo = process.env.CRABBOX_REPO || "";
-const home = process.env.HOME || "/root";
-function run(command, args) {
-  try {
-    return cp.execFileSync(command, args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5000
-    }).trim();
-  } catch {
-    return "";
-  }
-}
-function shell(command) {
-  return run("/bin/bash", ["-lc", command]);
-}
-function which(tool) {
-  return shell("command -v " + JSON.stringify(tool));
-}
-function oneLine(text) {
-  return String(text || "").split(/\\r?\\n/).find(Boolean) || "";
-}
-const toolResults = tools.map((name) => {
-  const path = which(name);
-  return {
-    name,
-    present: Boolean(path),
-    path: path || null,
-    version: path ? oneLine(run(path, ["--version"])) || null : null
-  };
-});
-const missing = toolResults.filter((tool) => !tool.present).map((tool) => tool.name);
-const checkout = {
-  path: workdir,
-  exists: Boolean(workdir && fs.existsSync(workdir)),
-  git: Boolean(workdir && fs.existsSync(workdir + "/.git")),
-  branch: workdir ? run("git", ["-C", workdir, "rev-parse", "--abbrev-ref", "HEAD"]) || null : null,
-  head: workdir ? run("git", ["-C", workdir, "rev-parse", "--short", "HEAD"]) || null : null,
-  remote: workdir ? run("git", ["-C", workdir, "config", "--get", "remote.origin.url"]).replace(/\\/\\/[^/@]+@/g, "//<redacted>@") || null : null
-};
-const codexHome = process.env.CODEX_HOME || home + "/.codex";
-const repoPermissionsRaw = repo ? run("gh", ["api", "repos/" + repo, "--jq", ".permissions"]) : "";
-let repoPermissions = null;
-try {
-  repoPermissions = repoPermissionsRaw ? JSON.parse(repoPermissionsRaw) : null;
-} catch {}
-const diagnostics = {
-  available: true,
-  imageVersion: process.env.CRABBOX_IMAGE_VERSION || null,
-  cwd: process.cwd(),
-  checkout,
-  github: {
-    credentialProxy: process.env.LOBSTERFLEET_SANDBOX === "1",
-    credentialFilePresent: fs.existsSync(home + "/.config/crabbox/github-credential"),
-    ghAuthenticated: Boolean(run("gh", ["api", "user", "--jq", ".login"])),
-    repo,
-    permissions: repoPermissions
-  },
-  codex: {
-    home: codexHome,
-    configPresent: fs.existsSync(codexHome + "/config.toml"),
-    authPresent: fs.existsSync(codexHome + "/auth.json")
-  },
-  tools: toolResults,
-  missing
-};
-console.log(JSON.stringify(diagnostics));
-NODE
-`,
-    { timeout: 20_000, env: { CRABBOX_WORKDIR: workdir, CRABBOX_REPO: session.repo } },
-  );
-  if (!result.success) {
-    return {
-      session: decoratedSession,
-      diagnostics: {
-        available: false,
-        reason: clean(result.stderr || result.stdout || "diagnostics failed", 700),
-      },
-    };
-  }
-  const output = result.stdout.trim();
-  try {
-    return { session: decoratedSession, diagnostics: JSON.parse(output) };
-  } catch {
-    return {
-      session: decoratedSession,
-      diagnostics: {
-        available: false,
-        reason: "diagnostics returned invalid JSON",
-        output: clean(output, 700),
-      },
-    };
-  }
-}
-
-async function listInteractiveSessionCheckpoints(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ checkpoints: Array<Omit<SandboxCheckpoint, "backup">>; session: InteractiveSession }> {
-  const session = await managedSandboxSession(env, user, id);
-  const stub = sandboxControlStub(env);
-  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const response = await stub.fetch(
-    `https://lobsterfleet.internal/api/session-control/checkpoints/${encodeURIComponent(id)}`,
-  );
-  if (!response.ok) throw serviceUnavailable("checkpoint registry is unavailable");
-  const body = (await response.json()) as { checkpoints?: SandboxCheckpoint[] };
-  return {
-    checkpoints: (body.checkpoints ?? []).map(({ backup: _backup, ...checkpoint }) => checkpoint),
-    session: decorateInteractiveSession(session, user, env),
-  };
-}
-
-async function checkpointInteractiveSession(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ checkpoint: Omit<SandboxCheckpoint, "backup">; session: InteractiveSession }> {
-  const session = await managedSandboxSession(env, user, id);
-  const lease = sandboxLeaseInfo(session);
-  const sandbox = getManagedSandbox(env, session);
-  const workdir = sandboxWorkdir(id);
-  const name = `checkpoint-${Date.now()}`;
-  const backup = await sandbox.createBackup(sandboxBackupOptions(env, workdir, name));
-  const checkpoint: SandboxCheckpoint = {
-    backup,
-    createdAt: Date.now(),
-    id: backup.id,
-    name,
-    sessionId: id,
-    workdir,
-  };
-  const stub = sandboxControlStub(env);
-  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const response = await stub.fetch("https://lobsterfleet.internal/api/session-control/checkpoints", {
-    method: "POST",
-    body: JSON.stringify(checkpoint),
-    headers: { "content-type": "application/json" },
-  });
-  if (!response.ok) throw serviceUnavailable("checkpoint registry is unavailable");
-  await appendInteractiveSessionEvent(
-    env,
-    id,
-    user,
-    `checkpoint created ${checkpoint.id} in ${lease.sandboxId}`,
-    Date.now(),
-  );
-  return {
-    checkpoint: (({ backup: _backup, ...item }) => item)(checkpoint),
-    session: decorateInteractiveSession(session, user, env),
-  };
-}
-
-async function restoreInteractiveSessionCheckpoint(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-  checkpointId: string,
-): Promise<{ checkpoint: Omit<SandboxCheckpoint, "backup">; session: InteractiveSession }> {
-  const session = await managedSandboxSession(env, user, id);
-  const stub = sandboxControlStub(env);
-  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const response = await stub.fetch(
-    `https://lobsterfleet.internal/api/session-control/checkpoints/${encodeURIComponent(
-      id,
-    )}/${encodeURIComponent(checkpointId)}`,
-  );
-  if (!response.ok) throw notFound("checkpoint not found");
-  const body = (await response.json()) as { checkpoint?: SandboxCheckpoint };
-  if (!body.checkpoint) throw notFound("checkpoint not found");
-  const sandbox = getManagedSandbox(env, session);
-  await sandbox.restoreBackup(body.checkpoint.backup);
-  await appendInteractiveSessionEvent(
-    env,
-    id,
-    user,
-    `checkpoint restored ${body.checkpoint.id}`,
-    Date.now(),
-  );
-  return {
-    checkpoint: (({ backup: _backup, ...item }) => item)(body.checkpoint),
-    session: decorateInteractiveSession(session, user, env),
-  };
-}
-
-function sandboxBackupOptions(env: RuntimeEnv, workdir: string, name: string): BackupOptions {
-  const localBucket = env.LOBSTERFLEET_LOCAL_SANDBOX_BACKUPS !== "0";
-  if (localBucket && !env.BACKUP_BUCKET) {
-    throw serviceUnavailable("checkpoint backups require the BACKUP_BUCKET R2 binding");
-  }
-  if (!localBucket && !sandboxHasPresignedBackupConfig(env)) {
-    throw serviceUnavailable(
-      "checkpoint backups require BACKUP_BUCKET plus CLOUDFLARE_ACCOUNT_ID, BACKUP_BUCKET_NAME, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY",
-    );
-  }
-  return {
-    dir: workdir,
-    excludes: ["node_modules", ".pnpm-store", ".cache", "dist", "build"],
-    gitignore: true,
-    ...(localBucket ? { localBucket: true } : {}),
-    name,
-  };
-}
-
-function sandboxHasPresignedBackupConfig(env: RuntimeEnv): boolean {
-  return Boolean(
-    env.BACKUP_BUCKET &&
-    env.CLOUDFLARE_ACCOUNT_ID &&
-    env.BACKUP_BUCKET_NAME &&
-    env.R2_ACCESS_KEY_ID &&
-    env.R2_SECRET_ACCESS_KEY,
-  );
-}
-
-async function managedSandboxSession(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<InteractiveSession> {
-  const session = await readInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  if (!canManageInteractiveSession(user, session)) {
-    throw forbidden("only the session owner or maintainer can manage checkpoints");
-  }
-  if (!env.SANDBOX || !session.leaseId?.startsWith(sandboxLeasePrefix)) {
-    throw badRequest("checkpoints require a Cloudflare Sandbox session");
-  }
-  if (["expired", "failed", "stopped"].includes(session.status)) {
-    throw badRequest(`session is ${session.status}`);
-  }
-  return session;
-}
-
-function getManagedSandbox(env: RuntimeEnv, session: InteractiveSession): CloudflareSandbox {
-  if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
-  const lease = sandboxLeaseInfo(session);
-  return getSandbox(env.SANDBOX, lease.sandboxId);
-}
-
-function sandboxBackupAllowedHosts(env: RuntimeEnv): string[] {
-  return env.CLOUDFLARE_ACCOUNT_ID && env.BACKUP_BUCKET_NAME
-    ? [`${env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`]
-    : [];
 }
 
 function interactiveTerminalTarget(
@@ -4512,16 +3990,15 @@ async function provisionInteractiveSession(
   session: InteractiveProvisionRequest,
   agentToken?: string,
 ): Promise<InteractiveProvisionResult | null> {
-  if (session.runtime === "container" && env.SANDBOX) {
-    return provisionWithSandbox(env, session, agentToken);
-  }
   // Real crabbox path: when broker creds are present, lease a box and store the
   // ssh target as the attach_url so the ssh bridge can find it later. This runs
   // inline (the broker takes ~40-90s) and skips the old pending_adapter route.
-  if (session.runtime === "crabbox" && crabboxConfigured(env as unknown as BrokerEnv)) {
+  if (isCrabboxRuntime(session.runtime) && crabboxConfigured(env as unknown as BrokerEnv)) {
     const result = await provisionCrabbox(env as unknown as ProvisionEnv, {
       id: session.id,
       owner: session.owner,
+      runtime: session.runtime,
+      ...(session.size ? { size: session.size } : {}),
     });
     await pinCrabboxHostKey(env, result.leaseId, result.hostKey);
     return {
@@ -4594,9 +4071,9 @@ async function provisionInteractiveEndpoint(
   const id = clean(session.id, 120);
   const repo = normalizeRepo(session.repo);
   const branch = clean(session.branch, 120) || "main";
-  const runtime = oneOf(session.runtime, ["crabbox", "container"], "container") as
+  const runtime = oneOf(session.runtime, ["crabbox", "crabbox-gui"], "crabbox") as
     | "crabbox"
-    | "container";
+    | "crabbox-gui";
   const command = interactiveCommand(session.command);
   const prompt = clean(session.prompt, 4000);
   const purpose = interactiveSessionPurpose(session.purpose, prompt, repo, branch, command);
@@ -4642,19 +4119,14 @@ async function provisionInteractivePayload(
   env: RuntimeEnv,
   payload: InteractiveProvisionRequest,
 ): Promise<InteractiveProvisionResult> {
-  if (payload.runtime === "container" && env.SANDBOX) {
-    return provisionWithSandbox(env, payload);
-  }
   if (env.CRABBOX_RUNTIME_PROVISION_URL) {
     return forwardRuntimeProvision(env, payload);
   }
-  if (payload.runtime === "container" && env.CRABBOX_CLOUDFLARE_RUNNER_URL) {
-    return provisionWithCloudflareRunner(env, payload);
-  }
-  if (payload.runtime === "crabbox" && crabboxConfigured(env as unknown as BrokerEnv)) {
+  if (isCrabboxRuntime(payload.runtime) && crabboxConfigured(env as unknown as BrokerEnv)) {
     const result = await provisionCrabbox(env as unknown as ProvisionEnv, {
       id: payload.id,
       owner: payload.owner,
+      runtime: payload.runtime,
     });
     await pinCrabboxHostKey(env, result.leaseId, result.hostKey);
     return {
@@ -4665,10 +4137,10 @@ async function provisionInteractivePayload(
       message: result.message,
     };
   }
-  if (payload.runtime === "crabbox" && env.CRABBOX_COORDINATOR_URL) {
+  if (isCrabboxRuntime(payload.runtime) && env.CRABBOX_COORDINATOR_URL) {
     return provisionWithCrabboxCoordinator(env, payload);
   }
-  if (payload.runtime === "crabbox" && env.CRABBOX_CLAWFLEET_URL) {
+  if (isCrabboxRuntime(payload.runtime) && env.CRABBOX_CLAWFLEET_URL) {
     return provisionWithClawFleet(env, payload);
   }
   return {
@@ -4696,138 +4168,6 @@ function authorizeProvisionEndpoint(request: Request, env: RuntimeEnv): void {
   }
   const expected = `Bearer ${env.CRABBOX_INTERACTIVE_PROVISION_TOKEN}`;
   if (!constantTimeEqual(request.headers.get("authorization") ?? "", expected)) throw unauthorized();
-}
-
-async function provisionWithSandbox(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-  agentToken?: string,
-): Promise<InteractiveProvisionResult> {
-  if (!env.SANDBOX) {
-    return failedProvision("Cloudflare Sandbox binding is not configured");
-  }
-  if (!env.SESSION_CONTROL) {
-    return failedProvision("SESSION_CONTROL Durable Object is not configured");
-  }
-  if (!env.OPENAI_API_KEY) {
-    return failedProvision("OPENAI_API_KEY is not configured for Cloudflare Sandbox Codex");
-  }
-
-  const lease = newSandboxLease(session.id);
-  const workdir = sandboxWorkdir(session.id);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-  try {
-    await registerSandboxCredentialPolicy(env, session, lease.sandboxId);
-    await setupSandboxTerminalSession(
-      sandbox,
-      env,
-      session,
-      workdir,
-      lease.terminalSessionId,
-      agentToken,
-    );
-  } catch (error) {
-    await unregisterSandboxCredentialPolicy(env, lease.sandboxId);
-    const message = clean(error instanceof Error ? error.message : String(error), 240);
-    return failedProvision(`Cloudflare Sandbox provision failed: ${message}`);
-  }
-
-  return {
-    status: "ready",
-    leaseId: sandboxLeaseId(lease),
-    attachUrl: `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`,
-    vncUrl: null,
-    message: `Cloudflare Sandbox ready for ${session.repo}`,
-  };
-}
-
-async function registerSandboxCredentialPolicy(
-  env: RuntimeEnv,
-  session: SandboxRuntimeSession,
-  sandboxId: string,
-): Promise<void> {
-  const stub = sandboxControlStub(env);
-  if (!stub) throw new Error("SESSION_CONTROL Durable Object is not configured");
-  const githubToken = "githubToken" in session ? session.githubToken : undefined;
-  const githubTokenCiphertext = githubToken ? await sealSecret(env, githubToken) : null;
-  if (githubToken && !githubTokenCiphertext) {
-    throw new Error(
-      "CRABBOX_TOKEN_ENCRYPTION_KEY or GITHUB_CLIENT_SECRET is required for user GitHub tokens",
-    );
-  }
-  const effectiveGithubToken = githubToken ?? env.GITHUB_TOKEN;
-  const githubCredentialSource = githubTokenCiphertext
-    ? "session"
-    : env.GITHUB_TOKEN
-      ? "worker"
-      : "none";
-  const githubRepoNodeId = effectiveGithubToken
-    ? await fetchGithubRepoNodeId(session.repo, effectiveGithubToken)
-    : null;
-  const policy: SandboxCredentialPolicy = {
-    allowedHosts: sandboxBackupAllowedHosts(env),
-    githubCredentialSource,
-    githubRepo: session.repo,
-    owner: session.owner,
-    sandboxId,
-    sessionId: session.id,
-    ...(githubRepoNodeId ? { githubRepoNodeId } : {}),
-    ...(githubTokenCiphertext ? { githubTokenCiphertext } : {}),
-    ...(env.OPENAI_BASE_URL ? { openAIBaseUrl: env.OPENAI_BASE_URL } : {}),
-    ...(env.OPENAI_ORG_ID ? { openAIOrgId: env.OPENAI_ORG_ID } : {}),
-  };
-  for (const lookupId of sandboxLookupIds(env, sandboxId)) {
-    const response = await stub.fetch("https://lobsterfleet.internal/api/session-control/register", {
-      method: "POST",
-      body: JSON.stringify({ ...policy, sandboxId: lookupId }),
-      headers: { "content-type": "application/json" },
-    });
-    if (!response.ok) {
-      throw new Error("sandbox credential policy registration failed");
-    }
-  }
-}
-
-async function ensureSandboxCredentialPolicy(
-  env: RuntimeEnv,
-  session: SandboxRuntimeSession,
-  sandboxId: string,
-): Promise<void> {
-  const hasFreshUserToken = Boolean("githubToken" in session && session.githubToken);
-  if (!hasFreshUserToken && (await sandboxCredentialPolicyExists(env, sandboxId))) return;
-  await registerSandboxCredentialPolicy(env, session, sandboxId);
-}
-
-async function sandboxCredentialPolicyExists(env: RuntimeEnv, sandboxId: string): Promise<boolean> {
-  const stub = sandboxControlStub(env);
-  if (!stub) return false;
-  const responses = await Promise.all(
-    sandboxLookupIds(env, sandboxId).map((lookupId) =>
-      stub.fetch(
-        `https://lobsterfleet.internal/api/session-control/egress/${encodeURIComponent(lookupId)}`,
-      ),
-    ),
-  );
-  return responses.some((response) => response.ok);
-}
-
-async function fetchGithubRepoNodeId(repo: string, token: string): Promise<string> {
-  const response = await fetch(`https://api.github.com/repos/${repo}`, {
-    headers: {
-      accept: "application/vnd.github+json",
-      authorization: `Bearer ${token}`,
-      "user-agent": "lobsterfleet",
-      "x-github-api-version": "2022-11-28",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub repository metadata lookup failed for ${repo}`);
-  }
-  const body = (await response.json()) as { node_id?: unknown };
-  if (typeof body.node_id !== "string" || !body.node_id) {
-    throw new Error(`GitHub repository metadata lookup did not include node_id for ${repo}`);
-  }
-  return body.node_id;
 }
 
 async function githubNodeBelongsToRepo(
@@ -4890,585 +4230,6 @@ function sandboxLookupIds(env: RuntimeEnv, sandboxId: string): string[] {
   return [...ids];
 }
 
-async function ensureCurrentSandboxLease(
-  request: Request,
-  env: RuntimeEnv,
-  user: User | null,
-  session: InteractiveSession & { githubToken?: string },
-): Promise<InteractiveSession & { githubToken?: string }> {
-  if (!env.SANDBOX) return session;
-  if (isCurrentSandboxLease(session.leaseId)) {
-    await ensureSandboxCredentialPolicy(env, session, sandboxLeaseInfo(session).sandboxId);
-    return session;
-  }
-  const originalLeaseId = session.leaseId;
-  if (!originalLeaseId) {
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  const refreshStartedAt = sandboxLeaseRefreshStartedAt(originalLeaseId);
-  const now = Date.now();
-  if (refreshStartedAt && now - refreshStartedAt < 2 * 60_000) {
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  if (!user || actor(user) !== session.owner) {
-    throw serviceUnavailable("session owner must reconnect to refresh Cloudflare Sandbox lease");
-  }
-  const githubToken = user?.subject.startsWith("github:")
-    ? (session.githubToken ?? (await sessionGitHubToken(request, env)))
-    : undefined;
-  if (user.subject.startsWith("github:") && !githubToken) {
-    throw forbidden("GitHub PR credentials are not connected; sign in with GitHub again");
-  }
-  const fallbackLeaseId = sandboxLeaseWithoutRefresh(originalLeaseId);
-  const oldSandboxId = originalLeaseId.startsWith(sandboxLeasePrefix)
-    ? sandboxLeaseInfo({ id: session.id, leaseId: fallbackLeaseId }).sandboxId
-    : null;
-  const refreshLeaseId = `${fallbackLeaseId}:refreshing-${now}-${crypto.randomUUID().slice(0, 8)}`;
-  const claim = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      lease_id: refreshLeaseId,
-      last_event: "Cloudflare Sandbox lease refresh started",
-      updated_at: now,
-    })
-    .where("id", "=", session.id)
-    .where("lease_id", "=", originalLeaseId)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .executeTakeFirst();
-  if ((claim.numUpdatedRows ?? 0n) === 0n) {
-    const current = await readInteractiveSession(env, session.id);
-    if (current && isCurrentSandboxLease(current.leaseId)) return current;
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  const provisioned = await provisionWithSandbox(env, {
-    id: session.id,
-    parentSessionId: session.parentSessionId,
-    rootSessionId: session.rootSessionId ?? session.id,
-    repo: session.repo,
-    branch: session.branch,
-    runtime: session.runtime,
-    command: session.command,
-    prompt: session.prompt,
-    purpose: session.purpose,
-    summary: session.summary,
-    owner: session.owner,
-    createdBy: session.createdBy,
-    ...(githubToken ? { githubToken } : {}),
-  });
-  if (provisioned.status === "failed") {
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
-        lease_id: fallbackLeaseId,
-        last_event: provisioned.message,
-        updated_at: Date.now(),
-      })
-      .where("id", "=", session.id)
-      .where("lease_id", "=", refreshLeaseId)
-      .execute();
-    throw serviceUnavailable(provisioned.message);
-  }
-  const refreshedAt = Date.now();
-  const update = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: provisioned.status,
-      lease_id: provisioned.leaseId,
-      attach_url: provisioned.attachUrl,
-      vnc_url: provisioned.vncUrl,
-      last_event: "Cloudflare Sandbox lease refreshed",
-      updated_at: refreshedAt,
-    })
-    .where("id", "=", session.id)
-    .where("lease_id", "=", refreshLeaseId)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .executeTakeFirst();
-  if ((update.numUpdatedRows ?? 0n) === 0n) {
-    if (provisioned.leaseId?.startsWith(sandboxLeasePrefix)) {
-      await unregisterSandboxCredentialPolicy(
-        env,
-        sandboxLeaseInfo({ id: session.id, leaseId: provisioned.leaseId }).sandboxId,
-      );
-    }
-    const current = await readInteractiveSession(env, session.id);
-    if (current && isCurrentSandboxLease(current.leaseId)) return current;
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  const newSandboxId = provisioned.leaseId?.startsWith(sandboxLeasePrefix)
-    ? sandboxLeaseInfo({ id: session.id, leaseId: provisioned.leaseId }).sandboxId
-    : null;
-  if (oldSandboxId && oldSandboxId !== newSandboxId) {
-    await unregisterSandboxCredentialPolicy(env, oldSandboxId);
-  }
-  await appendInteractiveSessionLog(
-    env,
-    session.id,
-    user,
-    "Cloudflare Sandbox lease refreshed",
-    refreshedAt,
-  );
-  return {
-    ...session,
-    status: provisioned.status,
-    leaseId: provisioned.leaseId,
-    attachUrl: provisioned.attachUrl,
-    vncUrl: provisioned.vncUrl,
-    lastEvent: "Cloudflare Sandbox lease refreshed",
-    ...(githubToken ? { githubToken } : {}),
-  };
-}
-
-async function prepareSandboxWorkspace(
-  sandbox: SandboxSessionTarget,
-  env: RuntimeEnv,
-  session: SandboxRuntimeSession,
-  workdir: string,
-): Promise<void> {
-  const repoUrl = `https://github.com/${session.repo}.git`;
-  const quotedRepoUrl = shellQuote(repoUrl);
-  const quotedBranch = shellQuote(session.branch);
-  const quotedWorkdir = shellQuote(workdir);
-  const quotedPrompt = shellQuote(session.prompt);
-  const checkoutErrorPath = sandboxCheckoutErrorPath(session.id);
-  const quotedCheckoutErrorPath = shellQuote(checkoutErrorPath);
-  const resetResult = await sandbox.exec(
-    [
-      `if [ ! -d ${quotedWorkdir}/.git ]; then`,
-      `  rm -rf ${quotedWorkdir}`,
-      `  mkdir -p ${quotedWorkdir}`,
-      `fi`,
-      `rm -f ${quotedCheckoutErrorPath}`,
-    ].join("\n"),
-    { timeout: 30_000 },
-  );
-  if (!resetResult.success) {
-    throw new Error(
-      clean(resetResult.stderr || resetResult.stdout || "workspace reset failed", 500),
-    );
-  }
-
-  const result = await sandbox.exec(
-    [
-      "checkout_status=0",
-      "cat > /tmp/crabbox-git-askpass-placeholder.sh <<'EOF'",
-      "#!/bin/sh",
-      'case "$1" in',
-      "  *Username*) printf '%s\\n' x-access-token ;;",
-      `  *Password*) printf '%s\\n' ${shellQuote(sandboxPlaceholderGitHubToken)} ;;`,
-      "  *) exit 1 ;;",
-      "esac",
-      "EOF",
-      "chmod 700 /tmp/crabbox-git-askpass-placeholder.sh",
-      "git_with_github_auth() {",
-      `  GIT_TERMINAL_PROMPT=0 GIT_USERNAME=x-access-token GIT_PASSWORD=${shellQuote(
-        sandboxPlaceholderGitHubToken,
-      )} GIT_ASKPASS=${shellQuote("/tmp/crabbox-git-askpass-placeholder.sh")} git -c credential.helper= "$@"`,
-      "}",
-      `if [ ! -d ${quotedWorkdir}/.git ]; then`,
-      `  tmp="${workdir}.clone.$$"`,
-      `  rm -rf "$tmp"`,
-      `  rm -f ${quotedCheckoutErrorPath}`,
-      `  if git_with_github_auth clone --depth 1 --branch ${quotedBranch} ${quotedRepoUrl} "$tmp" 2>/tmp/crabbox-git-clone.log || git_with_github_auth clone --depth 1 ${quotedRepoUrl} "$tmp" 2>>/tmp/crabbox-git-clone.log; then`,
-      `    if rm -rf ${quotedWorkdir} && mkdir -p ${quotedWorkdir} && cp -a "$tmp"/. ${quotedWorkdir}/; then`,
-      `      :`,
-      `    else`,
-      `      checkout_status=$?`,
-      `      printf 'Repository checkout copy failed for %s branch %s.\\n' ${quotedRepoUrl} ${quotedBranch} > ${quotedCheckoutErrorPath}`,
-      `    fi`,
-      `  else`,
-      `    printf 'Repository checkout failed for %s branch %s. See /tmp/crabbox-git-clone.log.\\n' ${quotedRepoUrl} ${quotedBranch} > ${quotedCheckoutErrorPath}`,
-      `    cat /tmp/crabbox-git-clone.log >> ${quotedCheckoutErrorPath} || true`,
-      `    checkout_status=70`,
-      `  fi`,
-      `  rm -rf "$tmp"`,
-      "fi",
-      `if [ "$checkout_status" -eq 0 ] && [ ! -d ${quotedWorkdir}/.git ]; then`,
-      `  if [ ! -s ${quotedCheckoutErrorPath} ]; then`,
-      `    printf 'Repository checkout failed for %s branch %s.\\n' ${quotedRepoUrl} ${quotedBranch} > ${quotedCheckoutErrorPath}`,
-      `  fi`,
-      `  checkout_status=70`,
-      `fi`,
-      `if [ "$checkout_status" -eq 0 ]; then`,
-      `  rm -f ${quotedCheckoutErrorPath}`,
-      `  cd ${quotedWorkdir} || checkout_status=$?`,
-      `fi`,
-      `if [ "$checkout_status" -eq 0 ]; then git config --global --add safe.directory ${quotedWorkdir} || true; fi`,
-      `if [ "$checkout_status" -eq 0 ]; then git remote set-url origin ${quotedRepoUrl} || true; fi`,
-      `if [ "$checkout_status" -eq 0 ]; then git_with_github_auth fetch --depth 1 origin ${quotedBranch} || checkout_status=$?; fi`,
-      `if [ "$checkout_status" -eq 0 ]; then git checkout -B ${quotedBranch} FETCH_HEAD || checkout_status=$?; fi`,
-      `if [ "$checkout_status" -eq 0 ]; then git rev-parse --verify HEAD >/dev/null || checkout_status=$?; fi`,
-      `if [ "$checkout_status" -eq 0 ]; then test "$(git rev-parse --abbrev-ref HEAD)" = ${quotedBranch} || checkout_status=$?; fi`,
-      `if [ "$checkout_status" -eq 0 ]; then test "$(git config --get remote.origin.url)" = ${quotedRepoUrl} || checkout_status=$?; fi`,
-      quotedPrompt
-        ? `if [ "$checkout_status" -eq 0 ]; then printf '%s\n' ${quotedPrompt} > .crabbox-initial-prompt.txt || checkout_status=$?; fi`
-        : `if [ "$checkout_status" -eq 0 ]; then rm -f .crabbox-initial-prompt.txt || checkout_status=$?; fi`,
-      `if [ "$checkout_status" -eq 0 ]; then`,
-      `  printf '\\nCRABBOX_CHECKOUT_OK\\n'`,
-      `else`,
-      `  if [ -s ${quotedCheckoutErrorPath} ]; then cat ${quotedCheckoutErrorPath}; fi`,
-      `  printf '\\nCRABBOX_CHECKOUT_FAILED %s\\n' "$checkout_status"`,
-      `fi`,
-    ].join("\n"),
-    { timeout: 120_000 },
-  );
-  const checkoutMarker = result.stdout.trim().split(/\r?\n/).at(-1);
-  if (!result.success || checkoutMarker !== "CRABBOX_CHECKOUT_OK") {
-    throw new Error(
-      clean(
-        [result.stdout, result.stderr].filter(Boolean).join("\n") || "repository checkout failed",
-        700,
-      ),
-    );
-  }
-}
-
-async function prepareSandboxCodexAuth(
-  sandbox: SandboxSessionTarget,
-  env: RuntimeEnv,
-  workdir: string,
-): Promise<void> {
-  const projectKey = JSON.stringify(workdir);
-  const workspaceKey = JSON.stringify("/workspace");
-  const result = await sandbox.exec(
-    `
-set -eu
-export CODEX_HOME="$HOME/.codex"
-mkdir -p "$CODEX_HOME"
-cat > "$CODEX_HOME/config.toml" <<'EOF'
-cli_auth_credentials_store = "file"
-forced_login_method = "api"
-preferred_auth_method = "apikey"
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
-
-[shell_environment_policy]
-inherit = "all"
-ignore_default_excludes = true
-
-[features]
-goals = true
-
-[projects.${projectKey}]
-trust_level = "trusted"
-
-[projects.${workspaceKey}]
-trust_level = "trusted"
-EOF
-if command -v node >/dev/null 2>&1; then
-  node - <<'NODE'
-const fs = require("fs");
-const path = require("path");
-const home = process.env.CODEX_HOME;
-const apiKey = process.env.OPENAI_API_KEY || "";
-if (!apiKey) process.exit(0);
-fs.writeFileSync(
-  path.join(home, "auth.json"),
-  JSON.stringify({ OPENAI_API_KEY: apiKey, auth_mode: "apikey" }),
-  { mode: 0o600 }
-);
-NODE
-elif command -v codex >/dev/null 2>&1 && [ -n "\${OPENAI_API_KEY:-}" ]; then
-  printf '%s' "$OPENAI_API_KEY" | codex -c 'forced_login_method="api"' login --with-api-key >/dev/null 2>&1 || true
-fi
-`,
-    {
-      timeout: 60_000,
-      env: {
-        OPENAI_API_KEY: env.OPENAI_API_KEY ? sandboxPlaceholderOpenAIKey : undefined,
-        OPENAI_BASE_URL: env.OPENAI_BASE_URL,
-        OPENAI_ORG_ID: env.OPENAI_ORG_ID,
-      },
-    },
-  );
-  if (!result.success) {
-    throw new Error(clean(result.stderr || result.stdout || "Codex auth setup failed", 700));
-  }
-}
-
-async function prepareSandboxRuntimeTools(
-  sandbox: SandboxSessionTarget,
-  env: RuntimeEnv,
-  session: SandboxRuntimeSession,
-  workdir: string,
-  commandEnv: Record<string, string | undefined> = {},
-  agentToken?: string,
-): Promise<void> {
-  const autostartScript = sandboxAutostartScriptPath(session.id);
-  const terminalShell = sandboxTerminalShellPath(session.id);
-  const result = await sandbox.exec(
-    `
-set -eu
-export CODEX_HOME="$HOME/.codex"
-missing_tools=""
-for tool in git node npm pnpm codex gh rg fd jq python3 make gcc time ssh rsync crabbox; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    missing_tools="$missing_tools $tool"
-  fi
-done
-if [ -n "$missing_tools" ]; then
-  printf 'Lobsterfleet sandbox image is missing required tools:%s\\n' "$missing_tools" >/tmp/crabbox-runtime-tools.log
-  if command -v crabbox-diagnostics >/dev/null 2>&1; then
-    crabbox-diagnostics >>/tmp/crabbox-runtime-tools.log 2>&1 || true
-  fi
-  cat /tmp/crabbox-runtime-tools.log
-  exit 72
-fi
-installed_codex="$(npm list -g @openai/codex --depth=0 --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{try{const v=JSON.parse(s).dependencies?.["@openai/codex"]?.version||""; if (v) console.log(v);}catch{}})' || true)"
-latest_codex="$(npm view @openai/codex version 2>/dev/null || true)"
-if [ -z "$installed_codex" ] || { [ -n "$latest_codex" ] && [ "$installed_codex" != "$latest_codex" ]; }; then
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 120s npm install -g @openai/codex@latest >/tmp/crabbox-codex-install.log 2>&1
-  else
-    npm install -g @openai/codex@latest >/tmp/crabbox-codex-install.log 2>&1
-  fi
-fi
-rm -f "$HOME/.config/crabbox/github-credential" 2>/dev/null || true
-rm -rf "$HOME/.config/gh" "$HOME/.local/share/gh" 2>/dev/null || true
-git config --global --unset-all credential.helper 2>/dev/null || true
-git config --global credential.helper "!f() { test \\"\\$1\\" = get || exit 0; printf 'username=x-access-token\\n'; printf 'password=%s\\n' ${shellQuote(sandboxPlaceholderGitHubToken)}; }; f"
-git config --global user.name ${shellQuote(session.owner)}
-git config --global user.email ${shellQuote(`${session.owner}@users.noreply.github.com`)}
-mkdir -p "$(dirname ${shellQuote(autostartScript)})"
-cat > ${shellQuote(autostartScript)} <<'EOF'
-export CODEX_HOME="$HOME/.codex"
-export GITHUB_TOKEN=${shellQuote(sandboxPlaceholderGitHubToken)}
-export GH_TOKEN=${shellQuote(sandboxPlaceholderGitHubToken)}
-export CRABBOX_SESSION_ID=${shellQuote(session.id)}
-export LOBSTERFLEET_SESSION_ID=${shellQuote(session.id)}
-export LOBSTERFLEET_PARENT_SESSION_ID=${shellQuote(session.parentSessionId ?? "")}
-export LOBSTERFLEET_ROOT_SESSION_ID=${shellQuote(session.rootSessionId ?? session.id)}
-export LOBSTERFLEET_AGENT_TOKEN=${shellQuote(agentToken ?? "")}
-export LOBSTERFLEET_API_URL=${shellQuote(appPublicOrigin(env))}
-export CRABBOX_REPO=${shellQuote(session.repo)}
-export CRABBOX_BRANCH=${shellQuote(session.branch)}
-export CRABBOX_RUNTIME=${shellQuote(session.runtime)}
-export CRABBOX_COMMAND=${shellQuote(session.command)}
-export CRABBOX_CHECKOUT_ERROR=${shellQuote(sandboxCheckoutErrorPath(session.id))}
-export CRABBOX_WORKDIR=${shellQuote(workdir)}
-if [ -z "\${CRABBOX_SHELL_BOOTSTRAPPED:-}" ]; then
-  export CRABBOX_SHELL_BOOTSTRAPPED=1
-  cd "$CRABBOX_WORKDIR" 2>/dev/null || true
-fi
-if [ -z "\${CRABBOX_CODEX_AUTOSTART_CHECKED:-}" ]; then
-  export CRABBOX_CODEX_AUTOSTART_CHECKED=1
-  crabbox_autostart_marker="$HOME/.cache/crabbox/\${CRABBOX_SESSION_ID:-session}.codex-autostarted"
-  mkdir -p "$HOME/.cache/crabbox" 2>/dev/null || true
-  if [ ! -e "$crabbox_autostart_marker" ]; then
-    if [ -s "\${CRABBOX_CHECKOUT_ERROR:-}" ]; then
-      printf '\\nLobsterfleet repository checkout failed:\\n'
-      cat "$CRABBOX_CHECKOUT_ERROR"
-      printf '\\n'
-    elif [ -n "\${CRABBOX_COMMAND:-}" ]; then
-      touch "$crabbox_autostart_marker" 2>/dev/null || true
-      (
-        cd "$CRABBOX_WORKDIR" 2>/dev/null || {
-          printf 'Lobsterfleet workdir is unavailable: %s\\n' "$CRABBOX_WORKDIR"
-          exit 127
-        }
-        env -u BASH_ENV -u PROMPT_COMMAND /bin/bash -c "$CRABBOX_COMMAND"
-      )
-    fi
-  fi
-fi
-EOF
-marker=${shellQuote(sandboxBashrcMarker(session))}
-bashrc_tmp="$HOME/.bashrc.crabbox.$$"
-{
-  printf '%s\\n' "$marker"
-  printf '%s\\n' 'source ${shellQuote(autostartScript)} 2>/dev/null || true'
-  if [ -f "$HOME/.bashrc" ]; then
-    awk -v marker="$marker" '$0 == marker { getline; next } { print }' "$HOME/.bashrc"
-  fi
-} > "$bashrc_tmp"
-mv "$bashrc_tmp" "$HOME/.bashrc"
-cat > ${shellQuote(terminalShell)} <<'EOF'
-#!/bin/bash
-cd ${shellQuote(workdir)} 2>/dev/null || true
-source ${shellQuote(autostartScript)} 2>/dev/null || true
-exec /bin/bash -i
-EOF
-chmod +x ${shellQuote(terminalShell)}
-`,
-    {
-      timeout: 300_000,
-      env: commandEnv,
-    },
-  );
-  if (!result.success) {
-    throw new Error(clean(result.stderr || result.stdout || "runtime tool setup failed", 700));
-  }
-}
-
-async function openSandboxTerminalResponse(
-  request: Request,
-  env: RuntimeEnv,
-  sandbox: ReturnType<typeof getSandbox>,
-  session: InteractiveSession & { githubToken?: string },
-  size: { cols: number; rows: number },
-): Promise<Response> {
-  const lease = sandboxLeaseInfo(session);
-  const options = {
-    cols: size.cols,
-    rows: size.rows,
-    shell: sandboxTerminalShellPath(session.id),
-  };
-  await ensureSandboxTerminalPrepared(sandbox, env, session, lease.terminalSessionId);
-  const open = async () => {
-    const terminalSession = await sandbox.getSession(lease.terminalSessionId);
-    return terminalSession.terminal(request, options);
-  };
-
-  try {
-    const response = await open();
-    if (response.webSocket && response.status === 101) return response;
-  } catch {
-    // A previous PTY disconnect can leave the SDK execution session terminated.
-  }
-
-  await recreateSandboxTerminalSession(sandbox, env, session, lease.terminalSessionId);
-  return open();
-}
-
-async function ensureSandboxTerminalPrepared(
-  sandbox: ReturnType<typeof getSandbox>,
-  env: RuntimeEnv,
-  session: InteractiveSession & { githubToken?: string },
-  terminalSessionId: string,
-): Promise<void> {
-  const workdir = sandboxWorkdir(session.id);
-  try {
-    if (await sandboxTerminalProfileExists(sandbox, env, session, workdir)) return;
-    await setupSandboxTerminalSession(sandbox, env, session, workdir, terminalSessionId);
-    return;
-  } catch {
-    // Missing or terminated default shell. Recreate the sandbox below.
-  }
-  await recreateSandboxTerminalSession(sandbox, env, session, terminalSessionId);
-}
-
-async function sandboxTerminalProfileExists(
-  sandbox: CloudflareSandbox,
-  env: RuntimeEnv,
-  session: InteractiveSession & { githubToken?: string },
-  workdir: string,
-): Promise<boolean> {
-  const setup = await createSandboxSession(
-    sandbox,
-    sandboxSetupSessionId(session.id),
-    "/workspace",
-    {
-      CRABBOX_SESSION_ID: session.id,
-    },
-  );
-  const marker = shellQuote(sandboxBashrcMarker(session));
-  const autostartScript = sandboxAutostartScriptPath(session.id);
-  const terminalShell = sandboxTerminalShellPath(session.id);
-  const repoUrl = `https://github.com/${session.repo}.git`;
-  const checks = [
-    `test -d ${shellQuote(workdir)}`,
-    `test -d ${shellQuote(workdir)}/.git`,
-    `test ! -s ${shellQuote(sandboxCheckoutErrorPath(session.id))}`,
-    `git -C ${shellQuote(workdir)} rev-parse --verify HEAD >/dev/null`,
-    `test "$(git -C ${shellQuote(workdir)} rev-parse --abbrev-ref HEAD)" = ${shellQuote(session.branch)}`,
-    `test "$(git -C ${shellQuote(workdir)} config --get remote.origin.url)" = ${shellQuote(repoUrl)}`,
-    `test -s ${shellQuote(autostartScript)}`,
-    `test -x ${shellQuote(terminalShell)}`,
-    `grep -Fqx '[shell_environment_policy]' "$HOME/.codex/config.toml"`,
-    `grep -Fqx '[projects."/workspace"]' "$HOME/.codex/config.toml"`,
-    `node -e 'const fs=require("fs"); const p=process.env.HOME+"/.codex/auth.json"; const auth=JSON.parse(fs.readFileSync(p,"utf8")); process.exit(auth.OPENAI_API_KEY==="lobsterfleet-worker-injected"?0:1)'`,
-    `grep -Fqx '        cd "$CRABBOX_WORKDIR" 2>/dev/null || {' ${shellQuote(autostartScript)}`,
-    `grep -Fqx ${marker} "$HOME/.bashrc"`,
-    `test ! -e "$HOME/.config/crabbox/github-credential"`,
-  ];
-  const result = await setup.exec(checks.join(" && "), { timeout: 10_000 });
-  return result.success;
-}
-
-async function setupSandboxTerminalSession(
-  sandbox: CloudflareSandbox,
-  env: RuntimeEnv,
-  session: SandboxRuntimeSession,
-  workdir: string,
-  terminalSessionId: string,
-  agentToken?: string,
-): Promise<void> {
-  const sessionEnv = sandboxSessionEnv(env, session, agentToken);
-  const setup = await createSandboxSession(
-    sandbox,
-    sandboxSetupSessionId(session.id),
-    "/workspace",
-    sessionEnv,
-  );
-  await runSandboxSetupStep("workspace mkdir", () => setup.mkdir(workdir, { recursive: true }));
-  await runSandboxSetupStep("repository checkout", () =>
-    prepareSandboxWorkspace(setup, env, session, workdir),
-  );
-  await runSandboxSetupStep("Codex auth", () => prepareSandboxCodexAuth(setup, env, workdir));
-  await runSandboxSetupStep("runtime tools", () =>
-    prepareSandboxRuntimeTools(setup, env, session, workdir, {}, agentToken),
-  );
-  await runSandboxSetupStep("terminal session", () =>
-    createFreshSandboxSession(sandbox, terminalSessionId, workdir, sessionEnv),
-  );
-}
-
-async function recreateSandboxTerminalSession(
-  sandbox: ReturnType<typeof getSandbox>,
-  env: RuntimeEnv,
-  session: InteractiveSession & { githubToken?: string },
-  terminalSessionId: string,
-): Promise<void> {
-  await setupSandboxTerminalSession(
-    sandbox,
-    env,
-    session,
-    sandboxWorkdir(session.id),
-    terminalSessionId,
-  );
-}
-
-function sandboxSessionEnv(
-  env: RuntimeEnv,
-  session: SandboxRuntimeSession,
-  agentToken?: string,
-): Record<string, string | undefined> {
-  return {
-    CRABBOX_SESSION_ID: session.id,
-    LOBSTERFLEET_SESSION_ID: session.id,
-    LOBSTERFLEET_PARENT_SESSION_ID: session.parentSessionId ?? undefined,
-    LOBSTERFLEET_ROOT_SESSION_ID: session.rootSessionId ?? session.id,
-    LOBSTERFLEET_AGENT_TOKEN: agentToken,
-    LOBSTERFLEET_API_URL: appPublicOrigin(env),
-    CRABBOX_REPO: session.repo,
-    CRABBOX_BRANCH: session.branch,
-    CRABBOX_RUNTIME: session.runtime,
-    TERM: "xterm-256color",
-    COLORTERM: "truecolor",
-    GH_TOKEN: sandboxHasGitHubCredential(env, session) ? sandboxPlaceholderGitHubToken : undefined,
-    GITHUB_TOKEN: sandboxHasGitHubCredential(env, session)
-      ? sandboxPlaceholderGitHubToken
-      : undefined,
-    TERM_PROGRAM: "ghostty",
-    TERM_PROGRAM_VERSION: "web",
-    OPENAI_API_KEY: env.OPENAI_API_KEY ? sandboxPlaceholderOpenAIKey : undefined,
-    OPENAI_BASE_URL: env.OPENAI_BASE_URL,
-    OPENAI_ORG_ID: env.OPENAI_ORG_ID,
-  };
-}
-
-function sandboxHasGitHubCredential(env: RuntimeEnv, session: SandboxRuntimeSession): boolean {
-  return Boolean(("githubToken" in session && session.githubToken) || env.GITHUB_TOKEN);
-}
-
-function githubTokenEnv(session: Pick<InteractiveProvisionRequest, "githubToken">): {
-  GITHUB_TOKEN?: string;
-  GH_TOKEN?: string;
-} {
-  return session.githubToken
-    ? { GITHUB_TOKEN: session.githubToken, GH_TOKEN: session.githubToken }
-    : {};
-}
-
 async function forwardRuntimeProvision(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
@@ -5494,68 +4255,6 @@ async function forwardRuntimeProvision(
     (await response.json().catch(() => ({}))) as Record<string, unknown>,
     "interactive provision failed: invalid runtime response",
   );
-}
-
-async function provisionWithCloudflareRunner(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-): Promise<InteractiveProvisionResult> {
-  if (!env.CRABBOX_CLOUDFLARE_RUNNER_TOKEN) {
-    return failedProvision("cloudflare runner token is not configured");
-  }
-
-  const runnerUrl = env.CRABBOX_CLOUDFLARE_RUNNER_URL as string;
-  const sandboxId = clean(`crabbox-${session.id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 64);
-  const workdir = cloudflareRunnerWorkdir(env, session);
-  const instanceType = cloudflareRunnerInstanceType(env);
-  let response: Response;
-  try {
-    response = await fetch(joinUrl(runnerUrl, "/v1/sandboxes"), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${env.CRABBOX_CLOUDFLARE_RUNNER_TOKEN}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        id: sandboxId,
-        leaseId: sandboxId,
-        repo: session.repo,
-        branch: session.branch,
-        workdir,
-        instanceType,
-        ttlSeconds: clampedSeconds(env.CRABBOX_CLOUDFLARE_RUNNER_TTL_SECONDS, 14_400),
-        idleTimeoutSeconds: clampedSeconds(env.CRABBOX_CLOUDFLARE_RUNNER_IDLE_SECONDS, 1_800),
-        env: githubTokenEnv(session),
-        labels: {
-          app: "crabbox",
-          session: session.id,
-          repo: session.repo,
-          branch: session.branch,
-          owner: session.owner,
-          runtime: session.runtime,
-          command: session.command,
-        },
-      }),
-    });
-  } catch (error) {
-    return failedProvision(`cloudflare runner provision failed: ${clean(String(error), 240)}`);
-  }
-  if (!response.ok) {
-    return failedProvision(`cloudflare runner provision failed: HTTP ${response.status}`);
-  }
-
-  const body = (await response.json().catch(() => ({}))) as CloudflareSandboxPayload;
-  const state = clean(body.state, 80);
-  const ready = state === "running" || state === "healthy";
-  return {
-    status: ready ? "ready" : "provisioning",
-    leaseId: `cloudflare:${clean(body.id, 120) || sandboxId}`,
-    attachUrl: null,
-    vncUrl: null,
-    message: ready
-      ? `cloudflare sandbox ready (${clean(body.instanceType, 80) || instanceType}); PTY bridge pending`
-      : `cloudflare sandbox ${state || "provisioning"}`,
-  };
 }
 
 async function provisionWithCrabboxCoordinator(
@@ -5637,7 +4336,9 @@ function crabboxCoordinatorLeaseRequest(
     requestedSlug: `lobsterfleet-${session.id.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`,
     provider: clean(env.CRABBOX_COORDINATOR_PROVIDER, 40) || "hetzner",
     target: "linux",
-    desktop: envFlag(env.CRABBOX_COORDINATOR_DESKTOP, true),
+    // GUI runtime gets a desktop, TUI stays headless. The env flag only acts as
+    // a floor for the GUI case (lets an operator force desktop env tweaks).
+    desktop: crabboxWantsDesktop(session.runtime) && envFlag(env.CRABBOX_COORDINATOR_DESKTOP, true),
     desktopEnv: clean(env.CRABBOX_COORDINATOR_DESKTOP_ENV, 40) || "xfce",
     class: clean(env.CRABBOX_COORDINATOR_CLASS, 80) || "standard",
     ...(serverType ? { serverType, serverTypeExplicit: true } : {}),
@@ -5656,7 +4357,7 @@ async function provisionWithClawFleet(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
 ): Promise<InteractiveProvisionResult> {
-  if (session.runtime !== "crabbox") {
+  if (!isCrabboxRuntime(session.runtime)) {
     return {
       status: "pending_adapter",
       leaseId: null,
@@ -5770,25 +4471,6 @@ export async function releaseCrabboxLease(
   } catch {
     // table not created yet (tests, fresh db) -- nothing to clean
   }
-}
-
-function cloudflareRunnerWorkdir(env: RuntimeEnv, session: InteractiveProvisionRequest): string {
-  const base = clean(env.CRABBOX_CLOUDFLARE_RUNNER_WORKDIR, 160) || "/workspace/crabbox";
-  const suffix = session.id.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-  return `${base.replace(/\/+$/, "")}/${suffix}`;
-}
-
-function cloudflareRunnerInstanceType(env: RuntimeEnv): string {
-  return (
-    optionalOneOf(env.CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE, [
-      "lite",
-      "basic",
-      "standard-1",
-      "standard-2",
-      "standard-3",
-      "standard-4",
-    ] as const) ?? "standard-4"
-  );
 }
 
 function clampedSeconds(value: string | undefined, fallback: number): number {
@@ -7044,20 +5726,6 @@ async function sessionGitHubToken(request: Request, env: RuntimeEnv): Promise<st
     : undefined;
 }
 
-async function sandboxSessionWithGitHubToken(
-  request: Request,
-  env: RuntimeEnv,
-  user: User | null,
-  session: InteractiveSession,
-): Promise<InteractiveSession & { githubToken?: string }> {
-  if (!user?.subject.startsWith("github:")) return session;
-  if (actor(user) !== session.owner) return session;
-  const githubToken =
-    (await sessionGitHubToken(request, env)) ??
-    (await sshGatewayKeyGitHubToken(request, env, user));
-  return githubToken ? { ...session, githubToken } : session;
-}
-
 async function sealSecret(env: RuntimeEnv, value: string): Promise<string | null> {
   const key = await secretEncryptionKey(env);
   if (!key) return null;
@@ -7890,23 +6558,22 @@ function selectRuntimeDescriptor(
   card: Pick<Card, "runtime" | "prompt">,
   workflow?: WorkflowConfig,
 ): RuntimeDescriptor {
+  if (card.runtime === "crabbox-gui") {
+    return runtimeDescriptor("crabbox-gui", "card runtime override");
+  }
   if (card.runtime === "crabbox") {
     return runtimeDescriptor("crabbox", "card runtime override");
   }
-  if (card.runtime === "container") {
-    return runtimeDescriptor("container", "card runtime override");
+  // A prompt that wants a desktop/manual/perf capability needs the GUI box.
+  const needsDesktop = /\b(vnc|manual|takeover|gpu|perf|performance)\b/i.test(card.prompt);
+  if (needsDesktop) {
+    return runtimeDescriptor("crabbox-gui", "prompt requires desktop/manual/perf capability");
   }
-  const needsCrabbox = /\b(vnc|manual|takeover|gpu|perf|performance)\b/i.test(card.prompt);
-  if (needsCrabbox) {
-    return runtimeDescriptor("crabbox", "prompt requires desktop/manual/perf capability");
+  if (workflow?.runtime === "crabbox-gui") {
+    return runtimeDescriptor("crabbox-gui", "repo CRABBOX.md runtime default");
   }
-  if (workflow?.runtime === "crabbox") {
-    return runtimeDescriptor("crabbox", "repo CRABBOX.md runtime default");
-  }
-  if (workflow?.runtime === "container") {
-    return runtimeDescriptor("container", "repo CRABBOX.md runtime default");
-  }
-  return runtimeDescriptor("container", "default container runtime");
+  // Everything else lands on the headless TUI box.
+  return runtimeDescriptor("crabbox", "default crabbox runtime");
 }
 
 function runtimeDescriptor(
@@ -7916,12 +6583,12 @@ function runtimeDescriptor(
   return {
     runtime,
     reason,
-    capabilities: runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
+    capabilities: capabilitiesForRuntime(runtime),
   };
 }
 
 function runtimeCapabilities(runtime: string, value: string): RuntimeCapabilities {
-  const fallback = runtime === "crabbox" ? crabboxCapabilities : containerCapabilities;
+  const fallback = capabilitiesForRuntime(runtime);
   const parsed = parseJson<Partial<RuntimeCapabilities>>(value, fallback);
   return {
     terminal: booleanCapability(parsed.terminal, fallback.terminal),
@@ -8044,15 +6711,6 @@ function htmlEscape(value: unknown): string {
     .replaceAll('"', "&quot;");
 }
 
-function decodeHeaderValue(value: string | null): string {
-  if (!value) return "";
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
 function base64FromBytes(bytes: Uint8Array): string {
   let binary = "";
   const chunkSize = 0x8000;
@@ -8077,36 +6735,6 @@ function bytesFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
-}
-
-function safeClipboardFilename(value: unknown, mediaType: string): string {
-  const raw =
-    String(value ?? "")
-      .split(/[\\/]/)
-      .pop() || "";
-  const base = clean(raw || `clipboard${clipboardExtension(mediaType)}`, 90)
-    .replace(/[^A-Za-z0-9._-]/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+/g, "-");
-  const fallback = `clipboard${clipboardExtension(mediaType)}`;
-  const name = base || fallback;
-  return name.includes(".") ? name : `${name}${clipboardExtension(mediaType)}`;
-}
-
-function clipboardExtension(mediaType: string): string {
-  const normalized = (mediaType.toLowerCase().split(";")[0] ?? "").trim();
-  return (
-    {
-      "image/png": ".png",
-      "image/jpeg": ".jpg",
-      "image/gif": ".gif",
-      "image/webp": ".webp",
-      "text/plain": ".txt",
-      "text/markdown": ".md",
-      "application/json": ".json",
-      "application/pdf": ".pdf",
-    }[normalized] || ".bin"
-  );
 }
 
 function joinUrl(base: string, path: string): string {
@@ -8148,35 +6776,6 @@ function sandboxIdForSession(id: string): string {
   return clean(`crabbox-${id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 63);
 }
 
-function newSandboxLease(id: string): { sandboxId: string; terminalSessionId: string } {
-  const suffix = crypto.randomUUID().slice(0, 8).toLowerCase();
-  const base = sandboxIdForSession(id);
-  const sandboxId = `${base.slice(0, 63 - suffix.length - 1)}-${suffix}`;
-  return {
-    sandboxId,
-    terminalSessionId: sandboxTerminalSessionId(id, suffix),
-  };
-}
-
-function sandboxLeaseId(lease: { sandboxId: string; terminalSessionId: string }): string {
-  return `${sandboxLeasePrefix}${lease.sandboxId}:${lease.terminalSessionId}:${sandboxLeaseProfile}`;
-}
-
-function isCurrentSandboxLease(leaseId: string | null | undefined): boolean {
-  return (
-    leaseId?.startsWith(sandboxLeasePrefix) === true && leaseId.endsWith(`:${sandboxLeaseProfile}`)
-  );
-}
-
-function sandboxLeaseRefreshStartedAt(leaseId: string): number | null {
-  const match = /:refreshing-(\d+)-[a-f0-9]+$/.exec(leaseId);
-  return match ? Number(match[1]) : null;
-}
-
-function sandboxLeaseWithoutRefresh(leaseId: string): string {
-  return leaseId.replace(/:refreshing-\d+-[a-f0-9]+$/, "");
-}
-
 function sandboxLeaseInfo(
   session: Pick<InteractiveSession | InteractiveProvisionRequest, "id"> & {
     leaseId?: string | null;
@@ -8198,32 +6797,6 @@ function sandboxTerminalSessionId(id: string, suffix?: string): string {
   const base = clean(`terminal-${id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 80);
   if (!suffix) return base;
   return `${base.slice(0, 80 - suffix.length - 1)}-${suffix}`;
-}
-
-function sandboxSetupSessionId(id: string): string {
-  return clean(`setup-${id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 80);
-}
-
-function sandboxWorkdir(id: string): string {
-  return `/workspace/${sandboxIdForSession(id)}`;
-}
-
-function sandboxAutostartScriptPath(id: string): string {
-  return `/tmp/.crabbox-autostart-${sandboxIdForSession(id)}.sh`;
-}
-
-function sandboxTerminalShellPath(id: string): string {
-  return `/tmp/.crabbox-terminal-${sandboxIdForSession(id)}.sh`;
-}
-
-function sandboxCheckoutErrorPath(id: string): string {
-  return `/tmp/crabbox-checkout-error-${sandboxIdForSession(id)}.txt`;
-}
-
-function sandboxBashrcMarker(
-  session: Pick<InteractiveSession | InteractiveProvisionRequest, "id">,
-): string {
-  return `# crabbox session ${session.id} autostart-v4`;
 }
 
 function terminalSize(request: Request, name: "cols" | "rows", fallback: number): number {
@@ -8251,120 +6824,6 @@ function isPassiveTerminalClose(reason: string | undefined): boolean {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
-}
-
-function compactEnvVars(env: Record<string, string | undefined>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-  );
-}
-
-type SandboxErrorDetails = {
-  code?: CloudflareSandboxSessionError["code"];
-  context?: unknown;
-};
-
-function isSandboxSessionAlreadyExists(error: unknown, sessionId: string): boolean {
-  return hasSandboxSessionErrorCode(error, "SESSION_ALREADY_EXISTS", sessionId);
-}
-
-function isSandboxSessionAlreadyGone(error: unknown, sessionId: string): boolean {
-  return (
-    hasSandboxSessionErrorCode(error, "SESSION_DESTROYED", sessionId) ||
-    hasSandboxSessionErrorCode(error, "SESSION_TERMINATED", sessionId) ||
-    hasSandboxSessionErrorCode(error, "FILE_NOT_FOUND", sessionId) ||
-    sandboxSessionNotFoundMessage(error, sessionId)
-  );
-}
-
-function hasSandboxSessionErrorCode(
-  error: unknown,
-  code: CloudflareSandboxSessionError["code"],
-  sessionId: string,
-): boolean {
-  const response = sandboxErrorResponse(error);
-  if (response?.code !== code) return false;
-  const responseSessionId = sandboxErrorSessionId(response);
-  return responseSessionId === null || responseSessionId === sessionId;
-}
-
-function sandboxErrorResponse(error: unknown): SandboxErrorDetails | null {
-  if (!error || typeof error !== "object") return null;
-  const response = (error as { errorResponse?: unknown }).errorResponse;
-  if (response && typeof response === "object") {
-    return response as SandboxErrorDetails;
-  }
-  return error as SandboxErrorDetails;
-}
-
-function sandboxErrorSessionId(response: SandboxErrorDetails): string | null {
-  const context = response.context;
-  if (!context || typeof context !== "object") return null;
-  const sessionId = (context as { sessionId?: unknown }).sessionId;
-  return typeof sessionId === "string" ? sessionId : null;
-}
-
-function sandboxSessionNotFoundMessage(error: unknown, sessionId: string): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return (
-    message === `Session '${sessionId}' not found` || message === `Session "${sessionId}" not found`
-  );
-}
-
-async function createNewSandboxSession(
-  sandbox: CloudflareSandbox,
-  id: string,
-  cwd: string,
-  env: Record<string, string | undefined>,
-): Promise<SandboxExecutionSession> {
-  return sandbox.createSession({
-    id,
-    cwd,
-    env: compactEnvVars(env),
-    commandTimeoutMs: 300_000,
-  });
-}
-
-async function createSandboxSession(
-  sandbox: CloudflareSandbox,
-  id: string,
-  cwd: string,
-  env: Record<string, string | undefined>,
-): Promise<SandboxExecutionSession> {
-  try {
-    return await createNewSandboxSession(sandbox, id, cwd, env);
-  } catch (error) {
-    if (!isSandboxSessionAlreadyExists(error, id)) throw error;
-    return sandbox.getSession(id);
-  }
-}
-
-async function createFreshSandboxSession(
-  sandbox: CloudflareSandbox,
-  id: string,
-  cwd: string,
-  env: Record<string, string | undefined>,
-): Promise<SandboxExecutionSession> {
-  try {
-    await sandbox.deleteSession(id);
-  } catch (error) {
-    if (!isSandboxSessionAlreadyGone(error, id)) throw error;
-  }
-  try {
-    return await createNewSandboxSession(sandbox, id, cwd, env);
-  } catch (error) {
-    if (!isSandboxSessionAlreadyExists(error, id)) throw error;
-    throw new Error(`fresh sandbox session ${id} still exists after delete`, { cause: error });
-  }
-}
-
-async function runSandboxSetupStep(step: string, operation: () => Promise<unknown>): Promise<void> {
-  try {
-    await operation();
-  } catch (error) {
-    const message = clean(error instanceof Error ? error.message : String(error), 500);
-    throw new Error(`${step}: ${message || "failed"}`);
-  }
 }
 
 function interactiveCommand(value: unknown): string {

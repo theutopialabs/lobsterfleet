@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { InteractiveSession } from "../../lib/api";
-import { sessionIsActive } from "../../lib/format";
+import { sessionIsActive, sessionIsFinished } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button } from "../../components/Button";
 import { EmptyState } from "../../components/EmptyState";
@@ -20,19 +20,34 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
   const sessions = state?.interactiveSessions ?? [];
   const repos = state?.repos ?? [];
 
+  // Released boxes are gone; keep their dead tiles out of the active grid. They
+  // can still be purged for good with "Clear finished".
+  const live = useMemo(() => sessions.filter((s) => !sessionIsFinished(s.status)), [sessions]);
+  const finishedCount = sessions.length - live.length;
+
   // group boxes by owner so the fleet reads operator-by-operator
   const groups = useMemo(() => {
     const byOwner = new Map<string, InteractiveSession[]>();
-    for (const s of sessions) {
+    for (const s of live) {
       const list = byOwner.get(s.owner) ?? [];
       list.push(s);
       byOwner.set(s.owner, list);
     }
     return [...byOwner.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [sessions]);
+  }, [live]);
 
-  const running = sessions.filter((s) => sessionIsActive(s.status)).length;
-  const operators = new Set(sessions.map((s) => s.owner)).size;
+  const running = live.filter((s) => sessionIsActive(s.status)).length;
+  const operators = new Set(live.map((s) => s.owner)).size;
+
+  const clearFinished = async () => {
+    try {
+      const { removedIds } = await endpoints.cleanupSessions();
+      await refresh();
+      toast(`Cleared ${removedIds.length} finished box${removedIds.length === 1 ? "" : "es"}`);
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Could not clear finished", "error");
+    }
+  };
 
   const onAttach = async (session: InteractiveSession) => {
     try {
@@ -53,9 +68,16 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
             Every crabbox, by operator and state. Lease, attach, babysit.
           </p>
         </div>
-        <Button variant="primary" onClick={() => setSheetOpen(true)}>
-          + New crabbox
-        </Button>
+        <div className="flex items-center gap-2">
+          {finishedCount > 0 && (
+            <Button variant="subtle" onClick={clearFinished}>
+              Clear finished ({finishedCount})
+            </Button>
+          )}
+          <Button variant="primary" onClick={() => setSheetOpen(true)}>
+            + New crabbox
+          </Button>
+        </div>
       </div>
 
       <div className="mt-7 grid grid-cols-1 gap-4 sm:grid-cols-3">
