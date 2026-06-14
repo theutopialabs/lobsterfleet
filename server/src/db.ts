@@ -28,6 +28,7 @@ function toParam(value: unknown): Param {
 }
 
 const READ_FALLBACK = /^\s*(select|pragma)\b/i;
+const CTE_MAIN_STATEMENT = /^\s*with\b[\s\S]*\)\s*(select|values|insert|update|delete|replace)\b/i;
 
 type ColumnAwareStatement = StatementSync & {
   columns?: () => unknown[];
@@ -40,7 +41,18 @@ function statementReturnsRows(stmt: StatementSync, sql: string): boolean {
   } catch {
     // Fall back to a conservative check below.
   }
-  return READ_FALLBACK.test(sql);
+  return fallbackStatementReturnsRows(sql);
+}
+
+function fallbackStatementReturnsRows(sql: string): boolean {
+  if (READ_FALLBACK.test(sql)) return true;
+  const cte = CTE_MAIN_STATEMENT.exec(sql);
+  const statement = cte?.[1]?.toLowerCase();
+  if (statement === "select" || statement === "values") return true;
+  if (statement === "insert" || statement === "update" || statement === "delete" || statement === "replace") {
+    return /\breturning\b/i.test(sql.slice(cte![0].length));
+  }
+  return false;
 }
 
 class NodeSqliteConnection implements DatabaseConnection {

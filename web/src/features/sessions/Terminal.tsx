@@ -111,7 +111,7 @@ export function Terminal({
       ws = socket;
 
       const sendSubscribe = () => {
-        // the server replays a snapshot on subscribe; start from a clean
+        // the server replays a snapshot on subscribe. Start from a clean
         // screen on reconnects so scrollback is not duplicated
         if (everSubscribed) term.reset();
         const flags = SubFlags.Output | SubFlags.Snapshot | SubFlags.Events;
@@ -177,7 +177,7 @@ export function Terminal({
         }
       };
 
-      // errors always come with a close; let onclose decide whether to retry
+      // errors always come with a close. Let onclose decide whether to retry
       socket.onclose = () => {
         canInput = false;
         // server said closed/error: that's final. anything else was a drop.

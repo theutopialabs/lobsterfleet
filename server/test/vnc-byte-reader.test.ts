@@ -23,4 +23,14 @@ describe("vnc byte reader", () => {
     assert.equal((await first).toString("utf8"), "ab");
     assert.equal(reader.leftover().toString("utf8"), "cd");
   });
+
+  it("rejects pending reads when canceled", async () => {
+    const reader = byteReader();
+    const pending = reader.read(4);
+
+    reader.cancel(new Error("closed"));
+
+    await assert.rejects(pending, /closed/);
+    await assert.rejects(() => reader.read(1), /closed/);
+  });
 });

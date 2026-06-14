@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// In dev (tsx) we're at server/src; in prod (esbuild bundle) at server/dist.
+// In dev (tsx) we're at server/src. In prod (esbuild bundle) at server/dist.
 // Migrations live at server/migrations either way.
 function migrationsDir(): string {
   return process.env.MIGRATIONS_DIR ?? join(here, "../migrations");

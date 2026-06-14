@@ -343,7 +343,7 @@ async function bridgeSession(ws: WebSocket, sessionId: string, canInput: boolean
     sendNotice(
       ws,
       sessionId,
-      target.status === "provisioning"
+      isWorkspaceProvisioning(target.status)
         ? "workspace still provisioning"
         : "no ssh terminal for this session",
     );
@@ -365,6 +365,10 @@ async function bridgeSession(ws: WebSocket, sessionId: string, canInput: boolean
       onClose: () => console.log(`[lobsterfleet] ssh bridge closed for ${sessionId}`),
     },
   );
+}
+
+function isWorkspaceProvisioning(status: string): boolean {
+  return status === "provisioning" || status === "pending_adapter";
 }
 
 // Land attaches in the tmux session the bootstrap started. Keep mouse scroll on
@@ -573,7 +577,7 @@ async function bridgeSessionWithSize(
     sendNotice(
       ws,
       sessionId,
-      target.status === "provisioning"
+      isWorkspaceProvisioning(target.status)
         ? "workspace still provisioning"
         : "no ssh terminal for this session",
     );

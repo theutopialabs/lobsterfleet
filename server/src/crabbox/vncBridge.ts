@@ -21,7 +21,7 @@ export type VncBridgeOpts = {
 
 const RFB_VERSION = Buffer.from("RFB 003.008\n", "latin1");
 // Where the desktop bootstrap writes the plaintext VNC password. The Linux
-// (Hetzner) image uses /var/lib; some images use /var/db, so we try both.
+// (Hetzner) image uses /var/lib. Some images use /var/db, so we try both.
 const VNC_PASSWORD_PATHS = ["/var/lib/crabbox/vnc.password", "/var/db/crabbox/vnc.password"];
 const BOX_VNC_PORT = 5900;
 
@@ -47,15 +47,18 @@ type ByteReader = {
   feed: (b: Buffer) => void;
   read: (n: number) => Promise<Buffer>;
   leftover: () => Buffer;
+  cancel: (reason?: Error) => void;
 };
 
 type PendingRead = {
   n: number;
   resolve: (b: Buffer) => void;
+  reject: (error: Error) => void;
 };
 
 export function byteReader(): ByteReader {
   let buf = Buffer.alloc(0);
+  let canceled: Error | null = null;
   const wants: PendingRead[] = [];
   const pump = (): void => {
     while (wants.length > 0) {
@@ -69,6 +72,7 @@ export function byteReader(): ByteReader {
   };
   return {
     feed(b) {
+      if (canceled) return;
       buf = Buffer.concat([buf, b]);
       pump();
     },
@@ -76,9 +80,10 @@ export function byteReader(): ByteReader {
       if (!Number.isInteger(n) || n < 0) {
         return Promise.reject(new Error("read size must be a non-negative integer"));
       }
+      if (canceled) return Promise.reject(canceled);
       if (n === 0) return Promise.resolve(Buffer.alloc(0));
-      return new Promise((resolve) => {
-        wants.push({ n, resolve });
+      return new Promise((resolve, reject) => {
+        wants.push({ n, resolve, reject });
         pump();
       });
     },
@@ -86,6 +91,13 @@ export function byteReader(): ByteReader {
       const b = buf;
       buf = Buffer.alloc(0);
       return b;
+    },
+    cancel(reason = new Error("byte reader canceled")) {
+      if (canceled) return;
+      canceled = reason;
+      buf = Buffer.alloc(0);
+      const pending = wants.splice(0);
+      for (const want of pending) want.reject(reason);
     },
   };
 }
@@ -134,6 +146,9 @@ export function attachVncBridge(
   const teardown = (): void => {
     if (closed) return;
     closed = true;
+    const closedError = new Error("vnc bridge closed");
+    wsReader.cancel(closedError);
+    boxReader.cancel(closedError);
     opts.onClose?.();
     try {
       boxStream?.end();
@@ -166,7 +181,7 @@ export function attachVncBridge(
     return teardown;
   }
 
-  // ws -> box. During handshake feed the reader; after, splice straight through.
+  // ws -> box. During handshake feed the reader. After that, splice straight through.
   ws.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
     const buf = toBuf(data);
     if (!buf) return;

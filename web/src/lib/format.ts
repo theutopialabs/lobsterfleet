@@ -73,7 +73,7 @@ export function sessionIsActive(status: InteractiveSessionStatus): boolean {
   return ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(status);
 }
 
-// Finished = released/dead. The box is gone; the record is just history and can
+// Finished = released/dead. The box is gone. The record is just history and can
 // be cleared. Matches the server's deadInteractiveSessionStatuses.
 export function sessionIsFinished(status: InteractiveSessionStatus): boolean {
   return ["stopped", "expired", "failed"].includes(status);

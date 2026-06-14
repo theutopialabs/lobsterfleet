@@ -20,7 +20,7 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
   const sessions = state?.interactiveSessions ?? [];
   const repos = state?.repos ?? [];
 
-  // Released boxes are gone; keep their dead tiles out of the active grid. They
+  // Released boxes are gone. Keep their dead tiles out of the active grid. They
   // can still be purged for good with "Clear finished".
   const live = useMemo(() => sessions.filter((s) => !sessionIsFinished(s.status)), [sessions]);
   const finishedCount = sessions.length - live.length;

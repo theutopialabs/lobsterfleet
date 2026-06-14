@@ -1,6 +1,6 @@
 // Stub of the Worker's build-time asset module. The new UI is served from
 // web/dist by the Node entry, so the old inlined Preact SPA assets are not used.
-// Docs strings stay real-ish so the /docs routes keep working; the SPA HTML is a
+// Docs strings stay real-ish so the /docs routes keep working. The SPA HTML is a
 // tiny redirect shell that should never be hit (the Node entry serves web/dist
 // for "/" before the ported handler sees it).
 export const APP_HTML = "<!doctype html><title>lobsterfleet</title>";
