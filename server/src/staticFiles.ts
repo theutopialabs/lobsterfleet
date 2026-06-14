@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { extname, resolve } from "node:path";
+import { basename, extname, resolve } from "node:path";
 
 export type StaticFileResult = {
   file: string;
@@ -22,6 +22,17 @@ export function staticFileForPath(webDist: string, pathname: string): StaticFile
 
   const index = resolve(root, "index.html");
   return isFile(index) ? { file: index } : null;
+}
+
+const HASHED_ASSET = /-[A-Za-z0-9_-]{8,}(?:\.[^./\\]+)+$/;
+
+export function staticCacheControl(file: string): string {
+  if (extname(file) === ".html") return "no-store";
+  const normalized = file.replaceAll("\\", "/");
+  if (normalized.includes("/assets/") && HASHED_ASSET.test(basename(file))) {
+    return "public, max-age=31536000, immutable";
+  }
+  return "public, max-age=3600";
 }
 
 function decodedPath(pathname: string): string | null {

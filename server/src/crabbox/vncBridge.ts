@@ -42,23 +42,29 @@ function toBuf(data: Buffer | ArrayBuffer | Buffer[]): Buffer | null {
 }
 
 // A tiny async byte reader fed by stream/socket events. read(n) resolves once n
-// bytes are buffered; leftover() drains whatever is left after the handshake.
+// bytes are buffered. leftover() drains whatever is left after the handshake.
 type ByteReader = {
   feed: (b: Buffer) => void;
   read: (n: number) => Promise<Buffer>;
   leftover: () => Buffer;
 };
 
-function byteReader(): ByteReader {
+type PendingRead = {
+  n: number;
+  resolve: (b: Buffer) => void;
+};
+
+export function byteReader(): ByteReader {
   let buf = Buffer.alloc(0);
-  let want: { n: number; resolve: (b: Buffer) => void } | null = null;
+  const wants: PendingRead[] = [];
   const pump = (): void => {
-    if (want && buf.length >= want.n) {
+    while (wants.length > 0) {
+      const want = wants[0]!;
+      if (buf.length < want.n) return;
+      wants.shift();
       const out = buf.subarray(0, want.n);
       buf = buf.subarray(want.n);
-      const resolve = want.resolve;
-      want = null;
-      resolve(out);
+      want.resolve(out);
     }
   };
   return {
@@ -67,8 +73,12 @@ function byteReader(): ByteReader {
       pump();
     },
     read(n) {
+      if (!Number.isInteger(n) || n < 0) {
+        return Promise.reject(new Error("read size must be a non-negative integer"));
+      }
+      if (n === 0) return Promise.resolve(Buffer.alloc(0));
       return new Promise((resolve) => {
-        want = { n, resolve };
+        wants.push({ n, resolve });
         pump();
       });
     },

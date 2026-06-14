@@ -33,7 +33,7 @@ import {
 } from "./crabbox/broker.js";
 import { createKnownHosts } from "./crabbox/knownHosts.js";
 import { responseSecurityHeaders } from "./securityHeaders.js";
-import { staticFileForPath } from "./staticFiles.js";
+import { staticCacheControl, staticFileForPath } from "./staticFiles.js";
 import { resolveRuntimePath } from "./runtimePaths.js";
 import { isLoopbackAddress, trustForwardedHeaders } from "./proxyTrust.js";
 
@@ -44,8 +44,8 @@ import { isLoopbackAddress, trustForwardedHeaders } from "./proxyTrust.js";
 // the CLI win, so we snapshot them and re-apply after the file load.
 const cliEnv = { ...process.env };
 try {
-  const rootEnv = new URL("../../.env", import.meta.url);
-  const serverEnv = new URL("../.env", import.meta.url);
+  const rootEnv = fileURLToPath(new URL("../../.env", import.meta.url));
+  const serverEnv = fileURLToPath(new URL("../.env", import.meta.url));
   process.loadEnvFile(existsSync(rootEnv) ? rootEnv : serverEnv);
   for (const [key, value] of Object.entries(cliEnv)) {
     if (value !== undefined) process.env[key] = value;
@@ -254,11 +254,7 @@ function serveStatic(pathname: string, res: ServerResponse): void {
 }
 
 function staticHeaders(contentType: string, file: string): Record<string, string> {
-  const isHtml = extname(file) === ".html";
-  return responseSecurityHeaders(
-    contentType,
-    isHtml ? "no-store" : "public, max-age=31536000, immutable",
-  );
+  return responseSecurityHeaders(contentType, staticCacheControl(file));
 }
 
 // Terminal websocket. We accept the upgrade, send the welcome frame, then bridge

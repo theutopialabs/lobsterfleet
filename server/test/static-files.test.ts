@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
-import { staticFileForPath } from "../src/staticFiles.js";
+import { staticCacheControl, staticFileForPath } from "../src/staticFiles.js";
 
 describe("static file resolution", () => {
   it("serves real files inside the web dist", async () => {
@@ -40,6 +40,20 @@ describe("static file resolution", () => {
     await withWebDist(async (root) => {
       assert.equal(staticFileForPath(root, "/%zz"), null);
     });
+  });
+
+  it("only marks hashed assets immutable", () => {
+    assert.equal(staticCacheControl(join("/app/dist", "index.html")), "no-store");
+    assert.equal(
+      staticCacheControl(join("/app/dist/assets", "app-a1b2c3d4.js")),
+      "public, max-age=31536000, immutable",
+    );
+    assert.equal(
+      staticCacheControl(join("/app/dist/assets", "app-a1b2c3d4.js.map")),
+      "public, max-age=31536000, immutable",
+    );
+    assert.equal(staticCacheControl(join("/app/dist/assets", "app.js")), "public, max-age=3600");
+    assert.equal(staticCacheControl(join("/app/dist", "favicon.ico")), "public, max-age=3600");
   });
 });
 

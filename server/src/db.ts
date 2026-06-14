@@ -27,7 +27,21 @@ function toParam(value: unknown): Param {
   return String(value);
 }
 
-const READ = /^\s*(select|with|pragma)\b/i;
+const READ_FALLBACK = /^\s*(select|pragma)\b/i;
+
+type ColumnAwareStatement = StatementSync & {
+  columns?: () => unknown[];
+};
+
+function statementReturnsRows(stmt: StatementSync, sql: string): boolean {
+  try {
+    const columns = (stmt as ColumnAwareStatement).columns?.();
+    if (Array.isArray(columns)) return columns.length > 0;
+  } catch {
+    // Fall back to a conservative check below.
+  }
+  return READ_FALLBACK.test(sql);
+}
 
 class NodeSqliteConnection implements DatabaseConnection {
   constructor(private readonly db: DatabaseSync) {}
@@ -35,7 +49,7 @@ class NodeSqliteConnection implements DatabaseConnection {
   async executeQuery<R>(query: CompiledQuery): Promise<QueryResult<R>> {
     const stmt: StatementSync = this.db.prepare(query.sql);
     const params = query.parameters.map(toParam);
-    if (READ.test(query.sql)) {
+    if (statementReturnsRows(stmt, query.sql)) {
       return { rows: stmt.all(...params) as R[] };
     }
     const result = stmt.run(...params);
