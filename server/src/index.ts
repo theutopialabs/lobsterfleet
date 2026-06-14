@@ -508,35 +508,36 @@ server.on("upgrade", (req, socket, head) => {
       sendWelcome(ws);
       // /api/terminal/ws multiplex: wait for the first Subscribe frame to learn
       // which session to attach to, then hand the ws to the bridge.
+      let handedOff = false;
       const onFirstMessage = (data: Buffer | ArrayBuffer | Buffer[]): void => {
-        void (async () => {
-          const bytes = Buffer.isBuffer(data)
+        const bytes = Buffer.isBuffer(data)
+          ? new Uint8Array(data)
+          : data instanceof ArrayBuffer
             ? new Uint8Array(data)
-            : data instanceof ArrayBuffer
-              ? new Uint8Array(data)
-              : new Uint8Array(Buffer.concat(data as Buffer[]));
-          const frame = decodeTerminalFrame(bytes);
-          if (!frame) return;
-          if (frame.type === TerminalMessageType.Subscribe && frame.sessionId) {
-            // hand off: the bridge installs its own message listener
-            ws.off("message", onFirstMessage);
-            const auth = await authorizeBridgeRequest(request, frame.sessionId, "view");
-            if (!auth.ok) {
-              sendTerminalError(ws, frame.sessionId, auth.reason);
-              ws.close(1008, auth.reason.slice(0, 120));
-              return;
-            }
-            // make sure we still honor any size hint in the subscribe payload
-            const sub = decodeSubscribePayload(frame.payload);
-            sendSubscribed(ws, frame.sessionId, auth.canInput);
-            void bridgeSessionWithSize(
-              ws,
-              frame.sessionId,
-              sub?.cols ?? null,
-              sub?.rows ?? null,
-              auth.canInput,
-            );
+            : new Uint8Array(Buffer.concat(data as Buffer[]));
+        const frame = decodeTerminalFrame(bytes);
+        if (!frame) return;
+        if (frame.type !== TerminalMessageType.Subscribe || !frame.sessionId) return;
+        if (handedOff) return;
+        handedOff = true;
+        ws.off("message", onFirstMessage);
+        void (async () => {
+          const auth = await authorizeBridgeRequest(request, frame.sessionId, "view");
+          if (!auth.ok) {
+            sendTerminalError(ws, frame.sessionId, auth.reason);
+            ws.close(1008, auth.reason.slice(0, 120));
+            return;
           }
+          // Make sure we still honor any size hint in the subscribe payload.
+          const sub = decodeSubscribePayload(frame.payload);
+          sendSubscribed(ws, frame.sessionId, auth.canInput);
+          void bridgeSessionWithSize(
+            ws,
+            frame.sessionId,
+            sub?.cols ?? null,
+            sub?.rows ?? null,
+            auth.canInput,
+          );
         })();
       };
       ws.on("message", onFirstMessage);

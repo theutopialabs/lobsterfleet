@@ -148,7 +148,7 @@ function toLease(raw: unknown): Lease {
   return {
     ...lease,
     sshPort: lease.sshPort ?? lease.port,
-    desktop: false,
+    desktop: lease.desktop ?? false,
   };
 }
 

@@ -89,6 +89,12 @@ describe("lobsterbox createLease", () => {
     assert.equal(lease.state, "active");
   });
 
+  it("preserves the desktop flag from lobsterbox", async () => {
+    capture({ desktop: true });
+    const lease = await createLease(baseEnv, {});
+    assert.equal(lease.desktop, true);
+  });
+
   it("throws LOBSTERBOX_SSH_PUBLIC_KEY when no key is configured", async () => {
     await assert.rejects(
       createLease({ LOBSTERBOX_URL: "http://b", LOBSTERBOX_TOKEN: "t" } as BrokerEnv, {}),
