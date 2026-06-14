@@ -61,9 +61,9 @@ describe("runtime preflight", () => {
     await withEnv(
       {
         CRABBOX_BOOTSTRAP_TOKEN: "bootstrap-secret",
-        CRABBOX_COORDINATOR_URL: "https://broker.example.test",
-        CRABBOX_COORDINATOR_TOKEN: "broker-secret",
-        CRABBOX_COORDINATOR_SSH_PUBLIC_KEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest",
+        LOBSTERBOX_URL: "https://broker.example.test",
+        LOBSTERBOX_TOKEN: "broker-secret",
+        LOBSTERBOX_SSH_PUBLIC_KEY: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest",
         CRABBOX_SSH_PRIVATE_KEY_PATH: keyPath,
         CRABBOX_TOKEN_ENCRYPTION_KEY: "token-encryption-secret",
         LOBSTERFLEET_PUBLIC_URL: "https://fleet.example.test",

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { resolveRuntimePath } from "../runtimePaths.js";
 
 // Resolves the codex credential this host carries. The deployment requirement
@@ -52,4 +52,28 @@ export function readHostCodexAuth(env: CodexAuthEnv = {}): HostCodexAuth | null 
     };
   }
   return null;
+}
+
+// The host's codex config and instructions, copied to boxes next to auth.json
+// so codex behaves the same there as it does here. Both optional.
+export type HostCodexExtras = {
+  configToml: string | null;
+  agentsMd: string | null;
+};
+
+export function readHostCodexExtras(env: CodexAuthEnv = {}): HostCodexExtras {
+  const dir = dirname(hostCodexAuthPath(env));
+  return {
+    configToml: readOptional(join(dir, "config.toml")),
+    agentsMd: readOptional(join(dir, "AGENTS.md")),
+  };
+}
+
+function readOptional(path: string): string | null {
+  try {
+    const raw = readFileSync(path, "utf8");
+    return raw.trim() ? raw : null;
+  } catch {
+    return null;
+  }
 }

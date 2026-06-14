@@ -1,82 +1,97 @@
 import { randomBytes } from "node:crypto";
 import { Socket } from "node:net";
 
-// Typed client for the crabbox broker (the lease control plane).
-// Leases a real Hetzner box, polls it to active, keeps it alive, tears it down.
-// Contract lives at https://broker.theutopialabs.com (see BLUEPRINT.md).
+// Typed client for the lobsterbox broker (our self-hosted lease control plane).
+// Leases a runner (a local Docker box, or a Hetzner VM), installs our ssh key on
+// it, hands back the host/port to attach, keeps it alive, and tears it down.
+// Contract: lobsterbox /api/leases (see ../../../lobsterbox).
+//
+// We ssh into the runner with the private key at CRABBOX_SSH_PRIVATE_KEY_PATH.
+// lobsterbox installs the matching public key below.
 
 export type BrokerEnv = {
-  CRABBOX_COORDINATOR_URL?: string;
-  CRABBOX_COORDINATOR_TOKEN?: string;
-  CRABBOX_COORDINATOR_PROVIDER?: string;
-  CRABBOX_COORDINATOR_PROVIDER_KEY?: string;
-  CRABBOX_COORDINATOR_CLASS?: string;
-  CRABBOX_COORDINATOR_TTL_SECONDS?: string;
-  CRABBOX_COORDINATOR_IDLE_SECONDS?: string;
-  CRABBOX_COORDINATOR_WORK_ROOT?: string;
+  LOBSTERBOX_URL?: string;
+  LOBSTERBOX_TOKEN?: string;
+  LOBSTERBOX_OWNER?: string;
+  // Default catalog selection used when a lease doesn't pick its own. region is
+  // a lobsterbox region id like "local" or "fsn1".
+  // machine is a machine id like "docker" or "cpx22".
+  LOBSTERBOX_REGION?: string;
+  LOBSTERBOX_MACHINE?: string;
+  LOBSTERBOX_TTL_SECONDS?: string;
+  LOBSTERBOX_IDLE_SECONDS?: string;
+  LOBSTERBOX_WORK_ROOT?: string;
+  LOBSTERBOX_SSH_PUBLIC_KEY?: string;
+  // Legacy fallbacks so an existing install's key/owner keep working.
   CRABBOX_COORDINATOR_SSH_PUBLIC_KEY?: string;
-  CRABBOX_COORDINATOR_ORG?: string;
   CRABBOX_OWNER?: string;
 };
 
-// What the broker hands back. We only type the bits we use, rest is loose.
+// What lobsterbox hands back. We only type the bits we use, rest is loose.
 export type Lease = {
   id: string;
-  state: "provisioning" | "active" | "failed" | "expired" | "releasing" | string;
+  state: "provisioning" | "active" | "failed" | "expired" | "released" | string;
   host?: string;
   sshUser?: string;
+  // lobsterbox returns a numeric `port`. We mirror it to sshPort for the bridge.
   sshPort?: string | number;
+  port?: number;
   slug?: string;
   provider?: string;
+  regionId?: string;
+  machineId?: string;
   desktop?: boolean;
-  provisioningAttempts?: number;
-  capacityHints?: unknown;
+  error?: string;
   [key: string]: unknown;
 };
 
 export type CreateLeaseOpts = {
-  // Optional friendly slug, ends up in the hostname.
+  // Optional friendly slug, ends up in the runner name.
   requestedSlug?: string;
-  // Extra fields override the env-derived defaults.
   ttlSeconds?: number;
   idleTimeoutSeconds?: number;
   sshPublicKey?: string;
   workRoot?: string;
   owner?: string;
-  // Ask the broker for a graphical desktop (GUI runtime). Omit/false = headless.
+  // Catalog selection. region = a lobsterbox region id, machine = a machine id.
+  // location/serverType are accepted as aliases so the existing provision
+  // plumbing keeps working without renames.
+  region?: string;
+  machine?: string;
+  location?: string;
+  serverType?: string;
+  // Run a full `apt upgrade` on the box at startup (slower boot). Off by default.
+  aptUpgrade?: boolean;
+  // Accepted but ignored: the lobsterbox baseline has no desktop/VNC runner.
   desktop?: boolean;
-  // Which desktop env to start when desktop is true (xfce, gnome, etc).
   desktopEnv?: string;
-  // Box size class (standard/fast/large/beast). Falls back to the install
-  // default when unset. The broker maps the class to real hardware.
   class?: string;
 };
 
 const DEFAULT_TTL_SECONDS = 3600;
 const DEFAULT_IDLE_SECONDS = 900;
 
-// Makes a new lease id like cbx_<24 hex chars>.
+// Makes a new lease id like cbx_<24 hex chars>. We pass it to lobsterbox so the
+// id is predictable and our release/heartbeat logic can recognize it later.
 export function newLeaseID(): string {
   return "cbx_" + randomBytes(12).toString("hex");
 }
 
 function baseUrl(env: BrokerEnv): string {
-  const url = env.CRABBOX_COORDINATOR_URL;
-  if (!url) throw new Error("CRABBOX_COORDINATOR_URL is not set");
+  const url = env.LOBSTERBOX_URL;
+  if (!url) throw new Error("LOBSTERBOX_URL is not set");
   return url.replace(/\/+$/, "");
 }
 
 function authHeaders(env: BrokerEnv, ownerOverride?: string): Record<string, string> {
-  const token = env.CRABBOX_COORDINATOR_TOKEN;
-  if (!token) throw new Error("CRABBOX_COORDINATOR_TOKEN is not set");
+  const token = env.LOBSTERBOX_TOKEN;
+  if (!token) throw new Error("LOBSTERBOX_TOKEN is not set");
   const headers: Record<string, string> = {
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
   };
-  const owner = (env.CRABBOX_OWNER ?? ownerOverride ?? "").trim();
-  const org = (env.CRABBOX_COORDINATOR_ORG ?? "").trim();
-  if (owner) headers["x-crabbox-owner"] = owner;
-  if (org) headers["x-crabbox-org"] = org;
+  const owner = (env.LOBSTERBOX_OWNER ?? env.CRABBOX_OWNER ?? ownerOverride ?? "").trim();
+  if (owner) headers["x-lobsterbox-owner"] = owner;
   return headers;
 }
 
@@ -100,7 +115,7 @@ async function request(
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`broker ${method} ${path} -> HTTP ${res.status}: ${text.slice(0, 500)}`);
+    throw new Error(describeBrokerError(method, path, res.status, text));
   }
   if (!text) return {};
   try {
@@ -110,66 +125,132 @@ async function request(
   }
 }
 
-// whoami sanity check. Returns the broker's view of the caller.
+// lobsterbox returns clean JSON errors like {"error":"unknown machine ..."}.
+// Pull the message out, fall back to the raw body.
+function describeBrokerError(method: string, path: string, status: number, text: string): string {
+  let detail = text.slice(0, 500);
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error === "string") detail = parsed.error;
+  } catch {
+    // not json, keep the raw slice
+  }
+  return `lobsterbox ${method} ${path} -> HTTP ${status}: ${detail}`;
+}
+
+// Normalize a raw lobsterbox lease into our Lease shape. lobsterbox uses a
+// numeric `port`. The ssh bridge reads `sshPort`, so mirror it.
+function toLease(raw: unknown): Lease {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("lobsterbox: empty lease in response");
+  }
+  const lease = raw as Lease;
+  return {
+    ...lease,
+    sshPort: lease.sshPort ?? lease.port,
+    desktop: false,
+  };
+}
+
+// lobsterbox has no /whoami. /health is the cheapest reachability check.
 export async function whoami(env: BrokerEnv): Promise<unknown> {
-  return request(env, "GET", "/v1/whoami");
+  const res = await fetch(`${baseUrl(env)}/health`);
+  return res.json().catch(() => ({}));
+}
+
+// A machine the catalog offers in a region. Specs come straight from Hetzner
+// cpuType is "shared" or "dedicated". The local Docker catalog leaves most of
+// these empty.
+export type CatalogMachine = {
+  id: string;
+  regionId: string;
+  name: string;
+  description?: string;
+  provider?: string;
+  available?: boolean;
+  cpuCores?: number;
+  memoryGb?: number;
+  diskGb?: number;
+  cpuType?: string;
+  category?: string;
+  architecture?: string;
+  deprecated?: boolean;
+  priceHourly?: { net?: string; gross?: string } | null;
+};
+
+export type CatalogRegion = {
+  id: string;
+  name: string;
+  description?: string;
+  machines: CatalogMachine[];
+};
+
+export type Catalog = { regions: CatalogRegion[] };
+
+// Pulls lobsterbox's live region+machine catalog (GET /api/catalog). For Hetzner
+// this is real locations and server types with specs and price. For the local
+// Docker backend it is one region with one machine.
+export async function getCatalog(env: BrokerEnv): Promise<Catalog> {
+  const out = (await request(env, "GET", "/api/catalog")) as {
+    catalog?: { regions?: CatalogRegion[] };
+  };
+  const regions = Array.isArray(out.catalog?.regions) ? out.catalog.regions : [];
+  return { regions };
 }
 
 export async function createLease(env: BrokerEnv, opts: CreateLeaseOpts = {}): Promise<Lease> {
-  const sshPublicKey = (opts.sshPublicKey ?? env.CRABBOX_COORDINATOR_SSH_PUBLIC_KEY ?? "").trim();
-  if (!sshPublicKey) throw new Error("CRABBOX_COORDINATOR_SSH_PUBLIC_KEY is not set");
-  const workRoot = opts.workRoot ?? env.CRABBOX_COORDINATOR_WORK_ROOT ?? "/home/crabbox/work";
+  const publicKey = (
+    opts.sshPublicKey ??
+    env.LOBSTERBOX_SSH_PUBLIC_KEY ??
+    env.CRABBOX_COORDINATOR_SSH_PUBLIC_KEY ??
+    ""
+  ).trim();
+  if (!publicKey) throw new Error("LOBSTERBOX_SSH_PUBLIC_KEY is not set");
+  const region = (opts.region ?? opts.location ?? env.LOBSTERBOX_REGION ?? "local").trim();
+  const machine = (opts.machine ?? opts.serverType ?? env.LOBSTERBOX_MACHINE ?? "docker").trim();
+  const workRoot = opts.workRoot ?? env.LOBSTERBOX_WORK_ROOT;
   const body = {
-    leaseID: newLeaseID(),
-    ...(opts.requestedSlug ? { requestedSlug: opts.requestedSlug } : {}),
-    provider: env.CRABBOX_COORDINATOR_PROVIDER ?? "hetzner",
-    target: "linux",
-    class: (opts.class || env.CRABBOX_COORDINATOR_CLASS || "standard").trim(),
-    // name our key in the provider account. without this the broker falls back
-    // to its default key name and rejects our (different) public key.
-    ...(env.CRABBOX_COORDINATOR_PROVIDER_KEY
-      ? { providerKey: env.CRABBOX_COORDINATOR_PROVIDER_KEY }
-      : {}),
-    sshUser: "crabbox",
-    sshPort: "22",
-    sshPublicKey,
-    workRoot,
-    // Only send desktop when asked. GUI runtime sets this true so the broker
-    // brings up a graphical box; TUI runtime leaves it false (headless).
-    ...(opts.desktop
-      ? { desktop: true, desktopEnv: opts.desktopEnv || "xfce" }
-      : { desktop: false }),
-    ttlSeconds: opts.ttlSeconds ?? toInt(env.CRABBOX_COORDINATOR_TTL_SECONDS, DEFAULT_TTL_SECONDS),
-    idleTimeoutSeconds:
-      opts.idleTimeoutSeconds ?? toInt(env.CRABBOX_COORDINATOR_IDLE_SECONDS, DEFAULT_IDLE_SECONDS),
-    keep: true,
+    id: newLeaseID(),
+    ...(opts.requestedSlug ? { slug: opts.requestedSlug } : {}),
+    publicKey,
+    region,
+    machine,
+    ttlSeconds: opts.ttlSeconds ?? toInt(env.LOBSTERBOX_TTL_SECONDS, DEFAULT_TTL_SECONDS),
+    idleSeconds: opts.idleTimeoutSeconds ?? toInt(env.LOBSTERBOX_IDLE_SECONDS, DEFAULT_IDLE_SECONDS),
+    ...(workRoot ? { workRoot } : {}),
+    ...(opts.aptUpgrade ? { aptUpgrade: true } : {}),
   };
-  const out = (await request(env, "POST", "/v1/leases", body, opts.owner)) as { lease?: Lease };
-  if (!out.lease?.id) throw new Error(`broker create lease: missing lease in response`);
-  return out.lease;
+  const out = (await request(env, "POST", "/api/leases", body, opts.owner)) as { lease?: unknown };
+  if (!(out.lease as Lease | undefined)?.id) {
+    throw new Error("lobsterbox create lease: missing lease in response");
+  }
+  return toLease(out.lease);
 }
 
 export async function getLease(env: BrokerEnv, id: string): Promise<Lease> {
-  const out = (await request(env, "GET", `/v1/leases/${encodeURIComponent(id)}`)) as {
-    lease?: Lease;
+  const out = (await request(env, "GET", `/api/leases/${encodeURIComponent(id)}`)) as {
+    lease?: unknown;
   };
-  if (!out.lease?.id) throw new Error(`broker get lease ${id}: missing lease in response`);
-  return out.lease;
+  if (!(out.lease as Lease | undefined)?.id) {
+    throw new Error(`lobsterbox get lease ${id}: missing lease in response`);
+  }
+  return toLease(out.lease);
 }
 
 export async function listLeases(env: BrokerEnv, limit = 20): Promise<Lease[]> {
-  const out = (await request(env, "GET", `/v1/leases?limit=${limit}`)) as {
-    leases?: Lease[];
-  };
-  return Array.isArray(out.leases) ? out.leases : [];
+  const out = (await request(env, "GET", "/api/leases")) as { leases?: unknown[] };
+  const leases = Array.isArray(out.leases) ? out.leases.map(toLease) : [];
+  return leases.slice(0, limit);
 }
 
 export async function heartbeatLease(env: BrokerEnv, id: string): Promise<void> {
-  await request(env, "POST", `/v1/leases/${encodeURIComponent(id)}/heartbeat`, {});
+  await request(env, "POST", `/api/leases/${encodeURIComponent(id)}/heartbeat`, {});
 }
 
-export async function releaseLease(env: BrokerEnv, id: string, del = true): Promise<void> {
-  await request(env, "POST", `/v1/leases/${encodeURIComponent(id)}/release`, { delete: del });
+// lobsterbox always releases (and deletes the runner). `del` is kept for the
+// old call sites but lobsterbox ignores it.
+export async function releaseLease(env: BrokerEnv, id: string, _del = true): Promise<void> {
+  await request(env, "POST", `/api/leases/${encodeURIComponent(id)}/release`, {});
 }
 
 export function coordinatorLeaseIdFromSessionLease(
@@ -177,7 +258,7 @@ export function coordinatorLeaseIdFromSessionLease(
 ): string | null {
   if (!leaseId) return null;
   if (leaseId.startsWith("crabbox:")) return leaseId.slice("crabbox:".length) || null;
-  if (leaseId.startsWith("cbx_")) return leaseId;
+  if (leaseId.startsWith("cbx_") || leaseId.startsWith("lbx_")) return leaseId;
   return null;
 }
 
@@ -188,8 +269,10 @@ export type WaitForActiveOpts = {
   onPoll?: (lease: Lease) => void;
 };
 
-// Polls a lease until it is active with a host, or gives up.
-// Throws on failed/expired or timeout, with the broker's reason when we have it.
+// Polls a lease until it is active with a host, or gives up. lobsterbox
+// provisions synchronously so the first poll is usually already active, but we
+// keep the loop so a slow Hetzner runner still works. Throws on failed/expired
+// or timeout, with lobsterbox's error when we have it.
 export async function waitForActive(
   env: BrokerEnv,
   id: string,
@@ -203,13 +286,7 @@ export async function waitForActive(
     opts.onPoll?.(lease);
     if (lease.state === "active" && lease.host) return lease;
     if (lease.state === "failed" || lease.state === "expired") {
-      const hint =
-        lease.provisioningAttempts !== undefined
-          ? ` attempts=${lease.provisioningAttempts}`
-          : "";
-      throw new Error(
-        `lease ${id} ${lease.state}${hint}: ${JSON.stringify(lease.capacityHints ?? {}).slice(0, 300)}`,
-      );
+      throw new Error(`lease ${id} ${lease.state}: ${lease.error ?? ""}`.trim());
     }
     if (Date.now() > deadline) {
       throw new Error(`lease ${id} not active after ${timeoutMs}ms (state=${lease.state})`);
@@ -242,10 +319,10 @@ export type WaitForSshOpts = {
   pollMs?: number;
 };
 
-// The broker calls a box "active" once the VM exists, but sshd needs another
-// ~30-60s before it accepts connections. Poll the ssh port so callers only flip
-// a session to "ready" once it can actually be attached. Best effort: on timeout
-// we just return (the bridge still retries), we do not fail a good lease.
+// A runner is "active" once the box exists, but sshd may need a moment before it
+// accepts connections (especially Hetzner). Poll the ssh port so callers only
+// flip a session to "ready" once it can actually be attached. Best effort: on
+// timeout we just return (the bridge still retries), we do not fail a good lease.
 export async function waitForSshReachable(
   host: string,
   port: number,

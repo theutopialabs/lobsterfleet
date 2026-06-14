@@ -18,6 +18,7 @@ const KEYS = [
   "GITHUB_CLIENT_SECRET",
   "GITHUB_REDIRECT_URI",
   "GITHUB_TOKEN",
+  "LOBSTERFLEET_GITHUB_TOKEN",
   "GITHUB_ORG",
   "CRABBOX_INTERACTIVE_PROVISION_URL",
   "CRABBOX_INTERACTIVE_PROVISION_TOKEN",
@@ -48,6 +49,15 @@ const KEYS = [
   "CRABBOX_SSH_PRIVATE_KEY_PATH",
   "CRABBOX_COORDINATOR_ORG",
   "CRABBOX_OWNER",
+  "LOBSTERBOX_URL",
+  "LOBSTERBOX_TOKEN",
+  "LOBSTERBOX_OWNER",
+  "LOBSTERBOX_REGION",
+  "LOBSTERBOX_MACHINE",
+  "LOBSTERBOX_TTL_SECONDS",
+  "LOBSTERBOX_IDLE_SECONDS",
+  "LOBSTERBOX_WORK_ROOT",
+  "LOBSTERBOX_SSH_PUBLIC_KEY",
   "LOBSTERFLEET_PUBLIC_URL",
   "LOBSTERFLEET_REDIRECT_HOSTS",
   "CRABBOX_SSH_GATEWAY_TOKEN",
@@ -111,7 +121,7 @@ const PLACEHOLDERS = new Set(["no", "none", "todo", "tbd", "changeme", "placehol
 function runtimePreflight(archiveDir: string): RuntimePreflight {
   const items = [
     coordinatorUrlItem(),
-    requiredEnvItem("coordinator_token", "Coordinator token", "CRABBOX_COORDINATOR_TOKEN"),
+    requiredEnvItem("coordinator_token", "Broker token", "LOBSTERBOX_TOKEN"),
     sshPublicKeyItem(),
     sshPrivateKeyItem(),
     archiveDirItem(archiveDir),
@@ -128,25 +138,27 @@ function runtimePreflight(archiveDir: string): RuntimePreflight {
 }
 
 function coordinatorUrlItem(): RuntimePreflightItem {
-  const value = cleanEnv(process.env.CRABBOX_COORDINATOR_URL);
+  const value = cleanEnv(process.env.LOBSTERBOX_URL);
   if (!meaningful(value)) {
-    return missing("coordinator_url", "Coordinator URL", "Set CRABBOX_COORDINATOR_URL");
+    return missing("coordinator_url", "Broker URL", "Set LOBSTERBOX_URL");
   }
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" && url.protocol !== "http:") {
-      return problem("coordinator_url", "Coordinator URL", "error", "Use an http or https URL");
+      return problem("coordinator_url", "Broker URL", "error", "Use an http or https URL");
     }
-    return ok("coordinator_url", "Coordinator URL", url.host);
+    return ok("coordinator_url", "Broker URL", url.host);
   } catch {
-    return problem("coordinator_url", "Coordinator URL", "error", "URL is not valid");
+    return problem("coordinator_url", "Broker URL", "error", "URL is not valid");
   }
 }
 
 function sshPublicKeyItem(): RuntimePreflightItem {
-  const value = cleanEnv(process.env.CRABBOX_COORDINATOR_SSH_PUBLIC_KEY);
+  const value = cleanEnv(
+    process.env.LOBSTERBOX_SSH_PUBLIC_KEY ?? process.env.CRABBOX_COORDINATOR_SSH_PUBLIC_KEY,
+  );
   if (!meaningful(value)) {
-    return missing("coordinator_ssh_key", "Coordinator SSH key", "Set CRABBOX_COORDINATOR_SSH_PUBLIC_KEY");
+    return missing("coordinator_ssh_key", "Runner SSH key", "Set LOBSTERBOX_SSH_PUBLIC_KEY");
   }
   if (!/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-)/.test(value)) {
     return problem("coordinator_ssh_key", "Coordinator SSH key", "warning", "Value does not look like an SSH public key");

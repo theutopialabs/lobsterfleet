@@ -72,7 +72,7 @@ export function BoardView() {
   };
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className="w-full">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Board</h1>

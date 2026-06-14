@@ -6,7 +6,7 @@ feature parity, and fully drivable by an agent over the API.
 
 It serves the web app, the REST/WebSocket API, and bridges live terminals to
 remote dev boxes over SSH. No Cloudflare, no extra services. The only outside
-dependencies are the crabbox broker (to lease boxes) and GitHub.
+dependencies are the lobsterbox broker (to lease boxes) and GitHub.
 
 ## What it does
 
@@ -27,9 +27,9 @@ dependencies are the crabbox broker (to lease boxes) and GitHub.
         |                          |                                            |
         +--------------------------+--------------------------------------------+
                                    v
-                  crabbox broker  https://broker.theutopialabs.com  (lease control plane)
+                  lobsterbox broker  (lease control plane)
                                    v  provisions
-                             Hetzner box (the crabbox)
+                        Docker or Hetzner runner
 ```
 
 One process serves the SPA, the API, and the terminal bridge. The broker hands out
@@ -38,7 +38,7 @@ boxes. The agent babysits the fleet by calling the same `/api/*` endpoints.
 ## Requirements
 
 - Node 24+ (the server uses the built-in `node:sqlite`, so no native build deps).
-- A crabbox broker URL + token.
+- A lobsterbox broker URL + token.
 - An SSH keypair so the server can reach leased boxes.
 - Codex installed and authed on this host. The server copies the host's codex
   credential onto every leased box, so each crabbox comes up codex-ready.
@@ -73,6 +73,17 @@ ChatGPT-plan tokens refresh over time, so re-copy the file occasionally, or use
 panel shows which source is active. Set `LOBSTERFLEET_CODEX_BOOTSTRAP=0` to turn
 the bootstrap off entirely.
 
+### Crabbox Codex defaults
+
+Default Codex files for new crabboxes live in the repo:
+
+- `defaults/codex/AGENTS.md`
+- `defaults/codex/config.toml`
+
+The New Crabbox sheet loads both files and lets you edit them for one lease. If
+either file is blank, that crabbox gets no file. If either file is missing,
+lobsterfleet falls back to the host Codex file.
+
 ## Configure
 
 Copy the example env and fill it in. Every var is documented in `.env.example`.
@@ -83,11 +94,10 @@ cp .env.example .env
 
 The ones that matter to get going:
 
-- `CRABBOX_COORDINATOR_URL` + `CRABBOX_COORDINATOR_TOKEN` -- the broker and its bearer token.
-- `CRABBOX_COORDINATOR_ORG` -- optional broker org tag. Set it only if your broker needs one.
-- `CRABBOX_OWNER` -- optional owner tag for broker grouping.
+- `LOBSTERBOX_URL` + `LOBSTERBOX_TOKEN` -- the broker and its bearer token.
+- `LOBSTERBOX_OWNER` -- optional owner tag for broker grouping.
 - `LOBSTERFLEET_PUBLIC_URL` -- the URL users and agents use to reach this app.
-- `CRABBOX_COORDINATOR_SSH_PUBLIC_KEY` -- public half of an app-managed key. Make one:
+- `LOBSTERBOX_SSH_PUBLIC_KEY` -- public half of an app-managed key. Make one:
   ```sh
   ssh-keygen -t ed25519 -f data/crabbox_key -N ""
   cat data/crabbox_key.pub   # paste into .env

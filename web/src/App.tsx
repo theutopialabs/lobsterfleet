@@ -134,7 +134,7 @@ function SharedSessionPage({ id, token }: { id: string; token: string }) {
   return (
     <div className="min-h-full bg-[var(--color-bg)] px-4 py-5 text-[15px] md:px-8 md:py-7">
       <div className="aurora" />
-      <div className="mx-auto max-w-5xl">
+      <div className="w-full">
         <div className="mb-5">
           <div className="text-xs uppercase tracking-[0.22em] text-[var(--color-faint)]">
             read-only share

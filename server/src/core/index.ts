@@ -40,9 +40,12 @@ import {
 } from "../crabbox/provision";
 import {
   coordinatorLeaseIdFromSessionLease,
+  getCatalog,
   releaseLease,
   type BrokerEnv,
+  type CatalogRegion,
 } from "../crabbox/broker";
+import { readProjectCodexDefaultsResponse } from "../crabbox/codexDefaults";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
 import { githubOAuthRedirectUri } from "./oauth";
 import { responseSecurityHeaders } from "../securityHeaders.js";
@@ -77,6 +80,7 @@ export type RuntimeEnv = Env & {
   GITHUB_CLIENT_SECRET?: string;
   GITHUB_REDIRECT_URI?: string;
   GITHUB_TOKEN?: string;
+  LOBSTERFLEET_GITHUB_TOKEN?: string;
   GITHUB_ORG?: string;
   CRABBOX_INTERACTIVE_PROVISION_URL?: string;
   CRABBOX_INTERACTIVE_PROVISION_TOKEN?: string;
@@ -107,6 +111,16 @@ export type RuntimeEnv = Env & {
   CRABBOX_SSH_PRIVATE_KEY_PATH?: string;
   CRABBOX_COORDINATOR_ORG?: string;
   CRABBOX_OWNER?: string;
+  // lobsterbox broker (self-hosted lease control plane).
+  LOBSTERBOX_URL?: string;
+  LOBSTERBOX_TOKEN?: string;
+  LOBSTERBOX_OWNER?: string;
+  LOBSTERBOX_REGION?: string;
+  LOBSTERBOX_MACHINE?: string;
+  LOBSTERBOX_TTL_SECONDS?: string;
+  LOBSTERBOX_IDLE_SECONDS?: string;
+  LOBSTERBOX_WORK_ROOT?: string;
+  LOBSTERBOX_SSH_PUBLIC_KEY?: string;
   LOBSTERFLEET_PUBLIC_URL?: string;
   LOBSTERFLEET_REDIRECT_HOSTS?: string;
   LOBSTERFLEET_ENABLE_DEV_IDENTITY?: string;
@@ -385,7 +399,12 @@ type InteractiveProvisionRequest = {
   summary: string;
   owner: string;
   createdBy: string;
+  configToml?: string;
+  agentsMd?: string;
   size?: string;
+  region?: string;
+  machine?: string;
+  aptUpgrade?: boolean;
   githubToken?: string;
 };
 
@@ -728,6 +747,20 @@ const sizeClassLabels: Record<string, string> = {
 };
 const defaultSizeClasses = ["standard", "fast", "large", "beast"] as const;
 type SizeOption = { id: string; label: string };
+
+// Live region+machine catalog from the lobsterbox broker, for the New Box sheet.
+// Empty when the broker isn't configured or unreachable, so the UI just falls
+// back to its defaults rather than breaking.
+async function boxCatalog(env: RuntimeEnv): Promise<{ regions: CatalogRegion[] }> {
+  if (!crabboxConfigured(env as unknown as BrokerEnv)) return { regions: [] };
+  try {
+    const catalog = await getCatalog(env as unknown as BrokerEnv);
+    return { regions: catalog.regions };
+  } catch (error) {
+    console.error("[lobsterfleet] box catalog fetch failed", error);
+    return { regions: [] };
+  }
+}
 
 function crabboxSizeOptions(env: RuntimeEnv): SizeOption[] {
   const configured = clean(env.CRABBOX_SIZE_CLASSES, 200)
@@ -1494,6 +1527,26 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     return json(await searchGitHubRefs(request, env));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/github/repos") {
+    requireRole(user, "maintainer");
+    return json(await listGitHubRepos(env));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/github/branches") {
+    requireRole(user, "maintainer");
+    return json(await listGitHubBranches(url, env));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/box-catalog") {
+    requireRole(user, "maintainer");
+    return json(await boxCatalog(env));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/codex-defaults") {
+    requireRole(user, "maintainer");
+    return json(readProjectCodexDefaultsResponse());
+  }
+
   if (request.method === "POST" && url.pathname === "/api/interactive-sessions") {
     requireRole(user, "maintainer");
     return json(await createInteractiveSession(request, env, user), { status: 201 });
@@ -1588,6 +1641,12 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
   if (request.method === "POST" && url.pathname === "/api/cards") {
     requireRole(user, "maintainer");
     return json(await createCard(request, env, user), { status: 201 });
+  }
+
+  const cardDeleteMatch = url.pathname.match(/^\/api\/cards\/([^/]+)$/);
+  if (request.method === "DELETE" && cardDeleteMatch) {
+    requireRole(user, "maintainer");
+    return json(await deleteCard(env, user, decodeURIComponent(cardDeleteMatch[1] ?? "")));
   }
 
   const runsMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/runs$/);
@@ -2122,6 +2181,8 @@ async function sshCreateInteractiveSession(
     runtime?: string;
     command?: string;
     prompt?: string;
+    configToml?: string;
+    agentsMd?: string;
     parentSessionId?: string;
     rootSessionId?: string;
     purpose?: string;
@@ -2152,6 +2213,8 @@ async function agentCreateInteractiveSession(
     runtime?: string;
     command?: string;
     prompt?: string;
+    configToml?: string;
+    agentsMd?: string;
     parentSessionId?: string;
     rootSessionId?: string;
     purpose?: string;
@@ -2184,6 +2247,8 @@ async function openClawCreateCrabbox(
     runtime?: string;
     command?: string;
     prompt?: string;
+    configToml?: string;
+    agentsMd?: string;
     owner?: string;
     parentSessionId?: string;
     rootSessionId?: string;
@@ -2477,8 +2542,14 @@ async function createInteractiveSession(
     repo?: string;
     branch?: string;
     runtime?: string;
+    size?: string;
+    region?: string;
+    machine?: string;
+    aptUpgrade?: boolean;
     command?: string;
     prompt?: string;
+    configToml?: string;
+    agentsMd?: string;
     parentSessionId?: string;
     rootSessionId?: string;
     purpose?: string;
@@ -2499,8 +2570,13 @@ async function createInteractiveSessionFromInput(
     branch?: string;
     runtime?: string;
     size?: string;
+    region?: string;
+    machine?: string;
+    aptUpgrade?: boolean;
     command?: string;
     prompt?: string;
+    configToml?: string;
+    agentsMd?: string;
     parentSessionId?: string;
     rootSessionId?: string;
     purpose?: string;
@@ -2526,8 +2602,15 @@ async function createInteractiveSessionFromInput(
     crabboxSizeOptions(env).map((option) => option.id),
     defaultSizeClass(env),
   );
+  // lobsterbox catalog ids. Free-form values go to the broker for validation.
+  // Empty means the broker's configured defaults.
+  const region = clean(body.region, 64);
+  const machine = clean(body.machine, 64);
+  const aptUpgrade = body.aptUpgrade === true;
   const command = interactiveCommand(body.command);
   const prompt = clean(body.prompt, 4000);
+  const configToml = codexFileContent(body.configToml, 20_000);
+  const agentsMd = codexFileContent(body.agentsMd, 20_000);
   const purpose = interactiveSessionPurpose(body.purpose, prompt, repo, branch, command);
   const summary = interactiveSessionSummary(body.summary, purpose, prompt);
   const owner = options.owner || actor(user);
@@ -2592,8 +2675,13 @@ async function createInteractiveSessionFromInput(
           branch,
           runtime,
           size,
+          ...(region ? { region } : {}),
+          ...(machine ? { machine } : {}),
+          ...(aptUpgrade ? { aptUpgrade: true } : {}),
           command,
           prompt,
+          ...(configToml !== undefined ? { configToml } : {}),
+          ...(agentsMd !== undefined ? { agentsMd } : {}),
           purpose,
           summary,
           owner,
@@ -3998,7 +4086,17 @@ async function provisionInteractiveSession(
       id: session.id,
       owner: session.owner,
       runtime: session.runtime,
+      repo: session.repo,
+      branch: session.branch,
+      command: session.command,
+      prompt: session.prompt,
+      configToml: session.configToml,
+      agentsMd: session.agentsMd,
+      ...(session.githubToken ? { githubToken: session.githubToken } : {}),
       ...(session.size ? { size: session.size } : {}),
+      ...(session.region ? { region: session.region } : {}),
+      ...(session.machine ? { machine: session.machine } : {}),
+      ...(session.aptUpgrade ? { aptUpgrade: true } : {}),
     });
     await pinCrabboxHostKey(env, result.leaseId, result.hostKey);
     return {
@@ -4076,6 +4174,8 @@ async function provisionInteractiveEndpoint(
     | "crabbox-gui";
   const command = interactiveCommand(session.command);
   const prompt = clean(session.prompt, 4000);
+  const configToml = codexFileContent(session.configToml, 20_000);
+  const agentsMd = codexFileContent(session.agentsMd, 20_000);
   const purpose = interactiveSessionPurpose(session.purpose, prompt, repo, branch, command);
   const summary = interactiveSessionSummary(session.summary, purpose, prompt);
   const owner = clean(session.owner, 240);
@@ -4091,6 +4191,8 @@ async function provisionInteractiveEndpoint(
     runtime,
     command,
     prompt,
+    ...(configToml !== undefined ? { configToml } : {}),
+    ...(agentsMd !== undefined ? { agentsMd } : {}),
     purpose,
     summary,
     owner,
@@ -4127,6 +4229,13 @@ async function provisionInteractivePayload(
       id: payload.id,
       owner: payload.owner,
       runtime: payload.runtime,
+      repo: payload.repo,
+      branch: payload.branch,
+      command: payload.command,
+      prompt: payload.prompt,
+      configToml: payload.configToml,
+      agentsMd: payload.agentsMd,
+      ...(payload.githubToken ? { githubToken: payload.githubToken } : {}),
     });
     await pinCrabboxHostKey(env, result.leaseId, result.hostKey);
     return {
@@ -4157,6 +4266,7 @@ function authorizeProvisionEndpoint(request: Request, env: RuntimeEnv): void {
     env.SANDBOX ||
     env.CRABBOX_RUNTIME_PROVISION_URL ||
     env.CRABBOX_CLOUDFLARE_RUNNER_URL ||
+    env.LOBSTERBOX_URL ||
     env.CRABBOX_COORDINATOR_URL ||
     env.CRABBOX_CLAWFLEET_URL,
   );
@@ -4541,6 +4651,31 @@ async function createCard(request: Request, env: RuntimeEnv, user: User): Promis
   throw new Error("failed to allocate card id");
 }
 
+async function deleteCard(
+  env: RuntimeEnv,
+  user: User,
+  id: string,
+): Promise<{ ok: boolean; removedId: string }> {
+  const card = await readCard(env, id);
+  if (!card) throw notFound("card not found");
+
+  const db = database(env);
+  const runs = await db
+    .selectFrom("run_attempts")
+    .select(["lease_id"])
+    .where("card_id", "=", card.id)
+    .execute();
+  await Promise.all(runs.map((run) => releaseCrabboxLease(env, run.lease_id)));
+
+  await db.transaction().execute(async (trx) => {
+    await trx.deleteFrom("events").where("card_id", "=", card.id).execute();
+    await trx.deleteFrom("run_attempts").where("card_id", "=", card.id).execute();
+    await trx.deleteFrom("cards").where("id", "=", card.id).execute();
+  });
+  await audit(env, user, `card deleted ${card.id}`, Date.now());
+  return { ok: true, removedId: card.id };
+}
+
 async function claimRunning(
   env: RuntimeEnv,
   user: User,
@@ -4835,6 +4970,156 @@ async function searchGitHubRefs(
     ? await fetchGitHubReferences(env, repos, number)
     : await fetchPublicGitHubReferences(env, repos, number);
   return { matches };
+}
+
+// Repos the configured GitHub token can reach. Backs the repo dropdown in the
+// new-crabbox sheet so the user picks instead of typing org/repo by hand.
+// Cached for a minute so reopening the sheet doesn't hammer GitHub.
+let githubRepoCache: { token: string; at: number; repos: string[] } | null = null;
+
+function githubListToken(env: RuntimeEnv): string {
+  return env.LOBSTERFLEET_GITHUB_TOKEN || env.GITHUB_TOKEN || "";
+}
+
+async function listGitHubRepos(env: RuntimeEnv): Promise<{ repos: string[] }> {
+  const token = githubListToken(env);
+  if (!token) throw badRequest("set LOBSTERFLEET_GITHUB_TOKEN to list repos");
+  const now = Date.now();
+  if (githubRepoCache && githubRepoCache.token === token && now - githubRepoCache.at < 60_000) {
+    return { repos: githubRepoCache.repos };
+  }
+  // Own pagination loop instead of githubFetchPages: that one stops at 1000
+  // rows and org-heavy accounts blow past it.
+  const rows: Array<{ full_name: string; archived: boolean; disabled: boolean }> = [];
+  try {
+    for (let page = 1; page <= 50; page += 1) {
+      const batch = await githubFetch<typeof rows>(
+        `/user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&direction=desc&per_page=100&page=${page}`,
+        token,
+      );
+      rows.push(...batch);
+      if (batch.length < 100) break;
+    }
+  } catch (error) {
+    if (error instanceof GitHubApiError) {
+      throw badRequest(`GitHub repo list failed (${error.status}). Check LOBSTERFLEET_GITHUB_TOKEN.`);
+    }
+    throw error;
+  }
+  const repos = rows
+    .filter((row) => !row.archived && !row.disabled)
+    .map((row) => normalizeRepo(row.full_name))
+    .filter(Boolean);
+  githubRepoCache = { token, at: now, repos };
+  return { repos };
+}
+
+// Branches for one allowlisted repo, default branch first then most recently
+// committed. Backs the branch dropdown in the new-crabbox sheet. Cached per
+// token+repo for a minute so reopening the sheet doesn't re-hit GitHub.
+const githubBranchCache = new Map<
+  string,
+  { at: number; branches: string[]; defaultBranch: string }
+>();
+
+async function listGitHubBranches(
+  url: URL,
+  env: RuntimeEnv,
+): Promise<{ branches: string[]; defaultBranch: string }> {
+  const repo = normalizeRepo(url.searchParams.get("repo") ?? "");
+  if (!repo) throw badRequest("repo is required");
+  await requireRepo(env, repo);
+  const token = githubListToken(env);
+  if (!token) throw badRequest("set LOBSTERFLEET_GITHUB_TOKEN to list branches");
+  const now = Date.now();
+  const cacheKey = `${token}:${repo}`;
+  const cached = githubBranchCache.get(cacheKey);
+  if (cached && now - cached.at < 60_000) {
+    return { branches: cached.branches, defaultBranch: cached.defaultBranch };
+  }
+  const result =
+    (await fetchBranchesGraphql(repo, token)) ?? (await fetchBranchesRest(repo, token));
+  const branches = [
+    result.defaultBranch,
+    ...result.names.filter((name) => name && name !== result.defaultBranch),
+  ].slice(0, 100);
+  githubBranchCache.set(cacheKey, { at: now, branches, defaultBranch: result.defaultBranch });
+  return { branches, defaultBranch: result.defaultBranch };
+}
+
+// GraphQL gives us branches sorted by commit date in one round trip.
+// Returns null on any failure so the caller can fall back to REST.
+async function fetchBranchesGraphql(
+  repo: string,
+  token: string,
+): Promise<{ defaultBranch: string; names: string[] } | null> {
+  const [owner, name] = repo.split("/");
+  if (!owner || !name) return null;
+  try {
+    const response = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        ...githubHeaders(),
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query LobsterfleetBranches($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            defaultBranchRef { name }
+            refs(refPrefix: "refs/heads/", first: 100, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+              nodes { name }
+            }
+          }
+        }`,
+        variables: { owner, name },
+      }),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json<{
+      data?: {
+        repository?: {
+          defaultBranchRef?: { name?: string } | null;
+          refs?: { nodes?: Array<{ name?: string } | null> | null } | null;
+        } | null;
+      };
+      errors?: unknown[];
+    }>();
+    const repository = payload.data?.repository;
+    if (payload.errors?.length || !repository) return null;
+    const names = (repository.refs?.nodes ?? []).flatMap((node) =>
+      node?.name ? [node.name] : [],
+    );
+    return { defaultBranch: repository.defaultBranchRef?.name || names[0] || "main", names };
+  } catch {
+    return null;
+  }
+}
+
+// REST fallback when GraphQL is unavailable. Order is whatever GitHub gives
+// us, the default branch still goes first.
+async function fetchBranchesRest(
+  repo: string,
+  token: string,
+): Promise<{ defaultBranch: string; names: string[] }> {
+  try {
+    const [meta, rows] = await Promise.all([
+      githubFetch<{ default_branch?: string }>(`/repos/${repo}`, token),
+      githubFetch<Array<{ name: string }>>(`/repos/${repo}/branches?per_page=100`, token),
+    ]);
+    const names = rows.map((row) => row.name).filter(Boolean);
+    return { defaultBranch: meta.default_branch || names[0] || "main", names };
+  } catch (error) {
+    if (error instanceof GitHubApiError) {
+      if (error.status === 404) {
+        throw badRequest(`GitHub repo not found or token lacks access: ${repo}`);
+      }
+      throw badRequest(
+        `GitHub branch list failed (${error.status}). Check LOBSTERFLEET_GITHUB_TOKEN.`,
+      );
+    }
+    throw error;
+  }
 }
 
 async function fetchGitHubReferences(
@@ -6679,6 +6964,10 @@ function clean(value: unknown, max: number): string {
   return String(value ?? "")
     .trim()
     .slice(0, max);
+}
+
+function codexFileContent(value: unknown, max: number): string | undefined {
+  return typeof value === "string" ? value.slice(0, max) : undefined;
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

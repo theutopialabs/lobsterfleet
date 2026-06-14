@@ -23,6 +23,7 @@ import {
   TerminalMessageType,
 } from "./core/terminal-protocol.js";
 import { attachSshBridge } from "./crabbox/sshBridge.js";
+import { CRABBOX_TMUX_SESSION } from "./crabbox/codexBootstrap.js";
 import { attachVncBridge } from "./crabbox/vncBridge.js";
 import { parseSshAttachUrl } from "./crabbox/provision.js";
 import {
@@ -361,6 +362,7 @@ async function bridgeSession(ws: WebSocket, sessionId: string, canInput: boolean
     { host: parsed.host, port: parsed.port, user: parsed.user, privateKeyPath: SSH_KEY_PATH },
     {
       allowInput: canInput,
+      command: ATTACH_COMMAND,
       knownHostKey: leaseId ? knownHosts.get(leaseId) : null,
       onLearnHostKey: leaseId ? (hash) => knownHosts.set(leaseId, hash) : undefined,
       onReady: () => console.log(`[lobsterfleet] ssh bridge up for ${sessionId} -> ${parsed.host}`),
@@ -368,6 +370,13 @@ async function bridgeSession(ws: WebSocket, sessionId: string, canInput: boolean
     },
   );
 }
+
+// Land attaches in the tmux session the bootstrap started. Keep mouse scroll on
+// so the browser wheel can move through tmux history.
+const ATTACH_COMMAND =
+  `tmux set-option -g mouse on 2>/dev/null || true; ` +
+  `tmux set-option -g history-limit 50000 2>/dev/null || true; ` +
+  `tmux attach -t ${CRABBOX_TMUX_SESSION} 2>/dev/null || exec bash -l`;
 
 function isTerminalUpgrade(pathname: string): boolean {
   return (
@@ -571,6 +580,7 @@ async function bridgeSessionWithSize(
       ...(cols ? { cols } : {}),
       ...(rows ? { rows } : {}),
       allowInput: canInput,
+      command: ATTACH_COMMAND,
       knownHostKey: leaseId ? knownHosts.get(leaseId) : null,
       onLearnHostKey: leaseId ? (hash) => knownHosts.set(leaseId, hash) : undefined,
       onReady: () => console.log(`[lobsterfleet] ssh bridge up for ${sessionId} -> ${parsed.host}`),
@@ -584,7 +594,7 @@ async function bridgeSessionWithSize(
 const HEARTBEAT_MS = 60 * 1000;
 const brokerEnv = process.env as unknown as BrokerEnv;
 async function heartbeatActiveLeases(): Promise<void> {
-  if (!brokerEnv.CRABBOX_COORDINATOR_URL || !brokerEnv.CRABBOX_COORDINATOR_TOKEN) return;
+  if (!brokerEnv.LOBSTERBOX_URL || !brokerEnv.LOBSTERBOX_TOKEN) return;
   let rows: Array<{ lease_id: string | null }>;
   try {
     rows = await sessionsDb

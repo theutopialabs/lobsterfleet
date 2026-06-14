@@ -10,6 +10,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { Field, Input, Select } from "../../components/Field";
 import { Panel } from "../../components/Panel";
 import { Chip, Pill, StatePill, toneForStatus } from "../../components/Pill";
+import { RepoCombobox } from "../fleet/RepoCombobox";
 
 const ROLES: Role[] = ["viewer", "maintainer", "owner"];
 // policy option lists match the server validators
@@ -22,7 +23,7 @@ export function AdminView() {
   // owners only. everyone else gets a soft gate.
   if (user?.role !== "owner") {
     return (
-      <div className="mx-auto max-w-5xl pt-6">
+      <div className="w-full pt-6">
         <EmptyState
           glyph="⚙"
           title="Owner only"
@@ -33,7 +34,7 @@ export function AdminView() {
   }
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="w-full">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">Admin</h1>
         <p className="mt-1 text-[var(--color-muted)]">
@@ -219,11 +220,23 @@ function AllowPanel({ entries }: { entries: AllowEntry[] }) {
   );
 }
 
-// Repo allowlist.
+// Repo allowlist. Pick from the GitHub token's repos or type any org/repo.
 function ReposPanel({ repos }: { repos: string[] }) {
   const { refresh, toast } = useStore();
   const [repo, setRepo] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [githubRepos, setGithubRepos] = useState<string[] | null>(null);
+
+  // pull the GitHub repo list once when the panel mounts
+  useEffect(() => {
+    endpoints
+      .githubRepos()
+      .then((data) => setGithubRepos(data.repos))
+      .catch(() => setGithubRepos([])); // no token or GitHub down, free text still works
+  }, []);
+
+  // only suggest repos that aren't allowlisted yet
+  const options = (githubRepos ?? []).filter((r) => !repos.includes(r));
 
   const add = async () => {
     const v = repo.trim();
@@ -256,16 +269,16 @@ function ReposPanel({ repos }: { repos: string[] }) {
 
   return (
     <Panel>
-      <PanelHead title="Repos" hint="owner/name repos the fleet may check out" />
+      <PanelHead title="Repos" hint="pick from your GitHub repos or type any org/repo" />
       <div className="flex items-end gap-2">
         <div className="flex-1">
           <Field label="Repository">
-            <Input
+            <RepoCombobox
               value={repo}
-              onChange={(e) => setRepo(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && add()}
-              placeholder="org/repo"
-              className="font-mono"
+              onChange={setRepo}
+              options={options}
+              loading={githubRepos === null}
+              onSubmit={add}
             />
           </Field>
         </div>

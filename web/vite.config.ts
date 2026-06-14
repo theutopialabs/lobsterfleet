@@ -14,6 +14,11 @@ export default defineConfig({
       "/docs": "http://localhost:8088",
     },
   },
+  // dev-mode dep optimizer needs the same es2022 floor as the prod build,
+  // noVNC's top-level await breaks the es2020 default
+  optimizeDeps: {
+    esbuildOptions: { target: "es2022" },
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,

@@ -26,6 +26,9 @@ server/.env
 *.pem
 id_ed25519*
 
+# project defaults that must be committed
+!defaults/codex/AGENTS.md
+
 # scratch
 tmp/
 logs/

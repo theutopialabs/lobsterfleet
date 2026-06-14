@@ -25,7 +25,7 @@ export function SettingsView() {
   ];
 
   return (
-    <div className="mx-auto max-w-4xl">
+    <div className="w-full">
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
         <p className="mt-1 text-[var(--color-muted)]">

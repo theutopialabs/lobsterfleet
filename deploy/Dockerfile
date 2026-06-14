@@ -44,6 +44,9 @@ COPY --from=build /out/server/migrations  ./server/migrations
 # which from /app/server/dist/.. lands here at /app/web/dist.
 COPY --from=build /src/web/dist           ./web/dist
 
+# Project-editable defaults that prefill New Crabbox Codex files.
+COPY --from=build /src/defaults           ./defaults
+
 # Writable runtime state: sqlite db + session archives.
 # Owned by the non-root node user (uid 1000). If you bind-mount ./data, make
 # sure the host dir is writable by uid 1000: chown -R 1000:1000 ./data

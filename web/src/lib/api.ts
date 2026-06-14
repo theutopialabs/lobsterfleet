@@ -193,10 +193,37 @@ export type FleetState = {
 
 // A box size the operator can pick. The server owns the list (env-overridable),
 // so the UI just renders whatever it gets. id is the broker class (standard,
-// beast, ...); label is for display.
+// beast, and so on. label is for display.
 export type SizeOption = {
   id: string;
   label: string;
+};
+
+// A machine the broker can lease in a region. Specs come from the provider
+// cpuType is "shared" or "dedicated" for Hetzner. The local Docker catalog
+// leaves most fields empty.
+export type CatalogMachine = {
+  id: string;
+  regionId: string;
+  name: string;
+  description?: string;
+  provider?: string;
+  available?: boolean;
+  cpuCores?: number;
+  memoryGb?: number;
+  diskGb?: number;
+  cpuType?: string;
+  category?: string;
+  architecture?: string;
+  deprecated?: boolean;
+  priceHourly?: { net?: string; gross?: string } | null;
+};
+
+export type CatalogRegion = {
+  id: string;
+  name: string;
+  description?: string;
+  machines: CatalogMachine[];
 };
 
 export type RepoWorkflow = {
@@ -291,13 +318,34 @@ export const endpoints = {
   logout: () => api.post<{ ok: boolean }>("/api/logout"),
   githubRefs: (number: number) =>
     api.get<{ matches: GitHubReference[] }>(`/api/github/refs?number=${number}`),
+  // Repos the server's GitHub token can reach, most recently pushed first.
+  githubRepos: () => api.get<{ repos: string[] }>("/api/github/repos"),
+  // Remote branches for an allowlisted repo, freshest commits first with the
+  // default branch on top. 403 when the repo isn't allowlisted.
+  githubBranches: (repo: string) =>
+    api.get<{ branches: string[]; defaultBranch: string }>(
+      `/api/github/branches?repo=${encodeURIComponent(repo)}`,
+    ),
+  // Live region+machine catalog from the broker, for the New Box sheet.
+  boxCatalog: () => api.get<{ regions: CatalogRegion[] }>("/api/box-catalog"),
+  codexDefaults: () =>
+    api.get<{
+      agentsMd: string;
+      configToml: string;
+      paths: { agentsMd: string; configToml: string };
+    }>("/api/codex-defaults"),
   createSession: (body: {
     repo: string;
     branch?: string;
     runtime?: string;
     size?: string;
+    region?: string;
+    machine?: string;
+    aptUpgrade?: boolean;
     command?: string;
     prompt?: string;
+    configToml?: string;
+    agentsMd?: string;
   }) => api.post<{ session: InteractiveSession }>("/api/interactive-sessions", body),
   sessionAction: (id: string, action: string) =>
     api.post<{ session: InteractiveSession }>(
@@ -323,6 +371,8 @@ export const endpoints = {
     runtime?: string;
     policy?: string;
   }) => api.post<{ card: Card }>("/api/cards", body),
+  deleteCard: (id: string) =>
+    api.del<{ ok: boolean; removedId: string }>(`/api/cards/${encodeURIComponent(id)}`),
   cardAction: (id: string, action: string) =>
     api.post<{ card: Card }>(`/api/cards/${encodeURIComponent(id)}/actions`, { action }),
   // Admin endpoints. They all return the fresh ServerState so callers can just

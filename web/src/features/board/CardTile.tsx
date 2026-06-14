@@ -2,12 +2,13 @@
 // with a left accent border colored by lane and Start/Advance actions.
 
 import { motion } from "framer-motion";
+import { Trash2 } from "lucide-react";
 import { useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { Card, Lane } from "../../lib/api";
 import { elapsed, firstLine, mergePolicyLabel, runtimeLabel } from "../../lib/format";
 import { useStore } from "../../lib/store";
-import { Button } from "../../components/Button";
+import { Button, IconButton } from "../../components/Button";
 import { Chip, StatePill } from "../../components/Pill";
 
 // left accent stripe per lane
@@ -52,6 +53,22 @@ export function CardTile({
     }
   };
 
+  const deleteCard = async () => {
+    const confirmed = window.confirm(`Delete ${card.id}? This removes its events and run history.`);
+    if (!confirmed) return;
+    setBusy("delete");
+    try {
+      await endpoints.deleteCard(card.id);
+      toast(`Deleted ${card.id}`);
+      await refresh();
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "Could not delete card";
+      toast(msg, "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <motion.div
       layout
@@ -72,6 +89,16 @@ export function CardTile({
         </button>
         {running && card.run && (
           <StatePill status={card.run.status} label={`${elapsed(card.startedAt)}`} />
+        )}
+        {canMaintain && (
+          <IconButton
+            label={`Delete card ${card.id}`}
+            onClick={deleteCard}
+            disabled={busy !== null}
+            className={`-mr-1 -mt-1 shrink-0 ${busy ? "opacity-50" : "hover:text-[var(--color-danger)]"}`}
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+          </IconButton>
         )}
       </div>
 
@@ -99,7 +126,7 @@ export function CardTile({
         </div>
       )}
 
-      <div className="mt-3 flex items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button size="sm" variant="subtle" onClick={() => onOpen(card)}>
           Details
         </Button>

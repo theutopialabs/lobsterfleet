@@ -5,7 +5,7 @@ import {
   type BrokerEnv,
   type Lease,
 } from "./broker.js";
-import { bootstrapCodexOnBox } from "./codexBootstrap.js";
+import { bootstrapCodexOnBox, type CodexWorkspace } from "./codexBootstrap.js";
 import type { CodexAuthEnv } from "./codexAuth.js";
 import { resolveRuntimePath } from "../runtimePaths.js";
 
@@ -40,11 +40,27 @@ export type CrabboxSessionLike = {
   runtime?: string;
   // Box size class (standard/fast/large/beast). Empty = install default.
   size?: string;
+  // lobsterbox catalog selection: region id (local, fsn1, ...) and machine id
+  // (docker, cpx22, ...). Empty = the broker's configured defaults.
+  region?: string;
+  machine?: string;
+  // Run a full `apt upgrade` on the box at startup. Off by default.
+  aptUpgrade?: boolean;
+  // What to set up on the box: repo to clone, branch, the command to start in
+  // tmux, and the initial prompt. All optional.
+  repo?: string;
+  branch?: string;
+  command?: string;
+  prompt?: string;
+  configToml?: string;
+  agentsMd?: string;
+  // Per-session GitHub token, falls back to the server's env token.
+  githubToken?: string;
 };
 
 // True when the broker creds are present, so we should take the real path.
 export function crabboxConfigured(env: BrokerEnv): boolean {
-  return Boolean(env.CRABBOX_COORDINATOR_URL && env.CRABBOX_COORDINATOR_TOKEN);
+  return Boolean(env.LOBSTERBOX_URL && env.LOBSTERBOX_TOKEN);
 }
 
 // Both crabbox runtimes lease a real box. "crabbox" is the headless TUI box,
@@ -83,7 +99,9 @@ export async function provisionCrabbox(
       owner: session.owner,
       desktop: wantsDesktop,
       desktopEnv: env.CRABBOX_COORDINATOR_DESKTOP_ENV || "xfce",
-      ...(session.size ? { class: session.size } : {}),
+      ...(session.region ? { region: session.region } : {}),
+      ...(session.machine ? { machine: session.machine } : {}),
+      ...(session.aptUpgrade ? { aptUpgrade: true } : {}),
     });
   } catch (error) {
     return {
@@ -120,14 +138,30 @@ export async function provisionCrabbox(
     let codexNote = "codex bootstrap skipped: ssh not reachable yet";
     let hostKey: string | null = null;
     if (reachable) {
-      const codex = await bootstrapCodexOnBox(env, {
-        host: active.host as string,
-        port,
-        user: (active.sshUser as string) || "crabbox",
-        privateKeyPath: resolveRuntimePath(
-          env.CRABBOX_SSH_PRIVATE_KEY_PATH ?? "./data/crabbox_key",
-        ),
-      });
+      const workspace: CodexWorkspace = {
+        repo: session.repo,
+        branch: session.branch,
+        command: session.command,
+        prompt: session.prompt,
+        configToml: session.configToml,
+        agentsMd: session.agentsMd,
+        githubToken:
+          session.githubToken ||
+          (env.LOBSTERFLEET_GITHUB_TOKEN as string | undefined) ||
+          (env.GITHUB_TOKEN as string | undefined),
+      };
+      const codex = await bootstrapCodexOnBox(
+        env,
+        {
+          host: active.host as string,
+          port,
+          user: (active.sshUser as string) || "crabbox",
+          privateKeyPath: resolveRuntimePath(
+            env.CRABBOX_SSH_PRIVATE_KEY_PATH ?? "./data/crabbox_key",
+          ),
+        },
+        workspace,
+      );
       codexNote = codex.detail;
       hostKey = codex.hostKey;
     }

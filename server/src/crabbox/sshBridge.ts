@@ -26,6 +26,9 @@ export type BridgeOpts = {
   rows?: number;
   // Read-only viewers can watch output but cannot write to the PTY.
   allowInput?: boolean;
+  // Run this in the PTY instead of a plain login shell. Used to land attaches
+  // in the box's tmux session (with a shell fallback inside the command).
+  command?: string;
   // Called once the ssh stream is up, handy for logging.
   onReady?: () => void;
   // Called when the bridge fully tears down (either side closed).
@@ -120,7 +123,8 @@ export function attachSshBridge(
   const allowInput = opts.allowInput ?? true;
 
   conn.on("ready", () => {
-    conn.shell({ term: "xterm-256color", cols, rows }, (err, stream) => {
+    const pty = { term: "xterm-256color", cols, rows };
+    const onStream = (err: Error | undefined, stream: import("ssh2").ClientChannel | undefined): void => {
       if (err || !stream) {
         sendError(ws, sessionId, `shell open failed: ${err ? err.message : "no stream"}`);
         teardown();
@@ -156,7 +160,12 @@ export function attachSshBridge(
         sendEvent(ws, sessionId, "exit", "ssh session closed");
         teardown();
       });
-    });
+    };
+    if (opts.command) {
+      conn.exec(opts.command, { pty }, onStream);
+    } else {
+      conn.shell(pty, onStream);
+    }
   });
 
   conn.on("error", (err) => {
