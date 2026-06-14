@@ -29,6 +29,7 @@ describe("local archive bucket", () => {
 
       await assert.rejects(() => bucket.put("../escape.txt", "bad"), /archive key escapes/);
       assert.equal(await bucket.get("../escape.txt"), null);
+      await assert.doesNotReject(() => bucket.delete("../escape.txt"));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

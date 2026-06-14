@@ -443,7 +443,14 @@ async function authorizeBridgeRequest(
 // Refuse a ws upgrade with a real HTTP response instead of completing the
 // handshake and erroring inside the socket.
 function rejectUpgrade(socket: import("node:stream").Duplex, status: number, reason: string): void {
-  const text = status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : "Bad Request";
+  const text =
+    status === 401
+      ? "Unauthorized"
+      : status === 403
+        ? "Forbidden"
+        : status === 405
+          ? "Method Not Allowed"
+          : "Bad Request";
   const body = `${reason.slice(0, 200)}\n`;
   socket.write(
     `HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
@@ -457,6 +464,10 @@ server.on("upgrade", (req, socket, head) => {
     const vncSessionId = vncSessionIdFromPath(pathname);
     if (!isTerminalUpgrade(pathname) && !vncSessionId) {
       socket.destroy();
+      return;
+    }
+    if (req.method !== "GET") {
+      rejectUpgrade(socket, 405, "websocket upgrades must use GET");
       return;
     }
 

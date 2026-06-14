@@ -20,7 +20,11 @@ export function createLocalBucket(root: string): R2Bucket {
       return {};
     },
     async delete(key) {
-      await rm(localPath(base, key), { force: true });
+      try {
+        await rm(localPath(base, key), { force: true });
+      } catch {
+        return;
+      }
     },
   };
 }
