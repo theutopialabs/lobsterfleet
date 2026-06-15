@@ -1991,12 +1991,10 @@ async function githubCallback(request: Request, env: RuntimeEnv): Promise<Respon
   });
   const tokenBody = await tokenResponse.json<{ access_token?: string; error?: string }>();
   if (!tokenBody.access_token) {
-    return text(
-      tokenBody.error ?? "OAuth token exchange failed.\n",
-      "text/plain; charset=utf-8",
-      {},
-      401,
-    );
+    // Log the upstream detail for the operator, but hand the browser a generic
+    // message so we never reflect GitHub's raw error back to the user.
+    console.warn("[lobsterfleet] github oauth token exchange failed:", tokenBody.error ?? "unknown");
+    return text("OAuth token exchange failed. Please try again.\n", "text/plain; charset=utf-8", {}, 401);
   }
 
   const freshUser = await refreshGitHubUser(env, tokenBody.access_token).catch(() => {
@@ -2101,14 +2099,6 @@ async function consumeSshLink(
 ): Promise<void> {
   const codeHash = await sha256(code);
   const db = database(env);
-  const row = await db
-    .selectFrom("ssh_link_codes")
-    .select(["fingerprint", "public_key", "label", "expires_at", "consumed_at"])
-    .where("code_hash", "=", codeHash)
-    .executeTakeFirst();
-  if (!row || row.consumed_at || row.expires_at <= now) {
-    throw badRequest("SSH link expired");
-  }
   const githubTokenCiphertext = await sealSecret(env, githubToken);
   // Same loud failure as createSession: a linked key without its GitHub
   // credential would just break later in a much more confusing place.
@@ -2117,14 +2107,27 @@ async function consumeSshLink(
       "CRABBOX_TOKEN_ENCRYPTION_KEY (or GITHUB_CLIENT_SECRET) is required to store GitHub credentials",
     );
   }
-  await executeBatch(env, [
-    db
+  // Consume the link atomically. The conditional update (consumed_at IS NULL and
+  // still fresh) is the race gate: if two requests hit the same code at once,
+  // only one update marks a row, the other sees zero rows and bails. busy_timeout
+  // keeps the second txn waiting rather than erroring on the lock.
+  const fingerprint = await db.transaction().execute(async (trx) => {
+    const claim = await trx
+      .updateTable("ssh_link_codes")
+      .set({ consumed_at: now })
+      .where("code_hash", "=", codeHash)
+      .where("consumed_at", "is", null)
+      .where("expires_at", ">", now)
+      .returning(["fingerprint", "public_key", "label"])
+      .executeTakeFirst();
+    if (!claim) throw badRequest("SSH link expired");
+    await trx
       .insertInto("ssh_keys")
       .values({
-        fingerprint: row.fingerprint,
+        fingerprint: claim.fingerprint,
         subject: user.subject,
-        public_key: row.public_key,
-        label: row.label,
+        public_key: claim.public_key,
+        label: claim.label,
         github_token_ciphertext: githubTokenCiphertext,
         created_at: now,
         last_used_at: now,
@@ -2133,16 +2136,17 @@ async function consumeSshLink(
       .onConflict((oc) =>
         oc.column("fingerprint").doUpdateSet({
           subject: user.subject,
-          public_key: row.public_key,
-          label: row.label,
+          public_key: claim.public_key,
+          label: claim.label,
           github_token_ciphertext: githubTokenCiphertext,
           last_used_at: now,
           revoked_at: null,
         }),
-      ),
-    db.updateTable("ssh_link_codes").set({ consumed_at: now }).where("code_hash", "=", codeHash),
-  ]);
-  await audit(env, user, `ssh key linked ${row.fingerprint}`, now);
+      )
+      .execute();
+    return claim.fingerprint;
+  });
+  await audit(env, user, `ssh key linked ${fingerprint}`, now);
 }
 
 function sshLinkConfirmHtml(
@@ -2791,8 +2795,8 @@ async function createInteractiveSessionFromInput(
     crabboxSizeOptions(env).map((option) => option.id),
     defaultSizeClass(env),
   );
-  const region = clean(body.region, 64) || defaultBoxRegion(env);
-  const machine = clean(body.machine, 64) || defaultBoxMachine(env);
+  const region = cleanSlug(body.region, "region") || defaultBoxRegion(env);
+  const machine = cleanSlug(body.machine, "machine") || defaultBoxMachine(env);
   const aptUpgrade = body.aptUpgrade === true;
   const command = interactiveCommand(body.command);
   const prompt = clean(body.prompt, 4000);
@@ -7767,6 +7771,18 @@ function clean(value: unknown, max: number): string {
   return String(value ?? "")
     .trim()
     .slice(0, max);
+}
+
+// Region and machine ids are simple slugs (nbg1, cx22, hetzner-cloud). Reject
+// anything else before it reaches the broker so we never forward junk that could
+// confuse the broker or land in its logs. Empty falls back to the default.
+function cleanSlug(value: unknown, field: string): string {
+  const slug = clean(value, 64);
+  if (!slug) return "";
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(slug)) {
+    throw badRequest(`invalid ${field}`);
+  }
+  return slug;
 }
 
 function codexFileContent(value: unknown, max: number): string | undefined {

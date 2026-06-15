@@ -109,6 +109,15 @@ describe("lobsterbox createLease", () => {
     );
   });
 
+  it("maps an aborted (timed out) fetch to a clear timeout error", async () => {
+    globalThis.fetch = (async () => {
+      const error = new Error("aborted");
+      error.name = "TimeoutError";
+      throw error;
+    }) as typeof fetch;
+    await assert.rejects(createLease(baseEnv, {}), /timed out/);
+  });
+
   it("surfaces lobsterbox's clean JSON error", async () => {
     globalThis.fetch = (async () =>
       new Response('{"error":"unknown machine for local: ccx33"}', { status: 400 })) as typeof fetch;
