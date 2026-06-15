@@ -1,0 +1,24 @@
+approval_policy = "on-request"
+approvals_reviewer = "auto_review"
+model_reasoning_effort = "xhigh"
+suppress_unstable_features_warning = true
+personality = "pragmatic"
+model = "gpt-5.5"
+
+sandbox_mode = "workspace-write"
+
+[features]
+multi_agent = true
+child_agents_md = true
+goals = true
+js_repl = false
+
+[agents]
+max_threads = 6
+max_depth = 2
+
+[tui]
+status_line = ["model-with-reasoning", "git-branch", "five-hour-limit", "weekly-limit", "context-used", "context-window-size"]
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4

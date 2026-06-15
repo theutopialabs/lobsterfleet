@@ -1,0 +1,17 @@
+.git
+node_modules
+**/node_modules
+
+.env
+.env.*
+**/.env
+**/.env.*
+*.env
+**/.secrets
+data
+**/data
+
+server/dist
+web/dist
+.pnpm-store
+coverage

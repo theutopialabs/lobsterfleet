@@ -1,0 +1,22 @@
+{
+  "name": "lobsterfleet",
+  "private": true,
+  "type": "module",
+  "description": "Self-hostable lobsterfleet: fleet mission-control you run in your own LXC.",
+  "scripts": {
+    "dev": "pnpm --parallel -r dev",
+    "dev:server": "pnpm --filter @lobsterfleet/server dev",
+    "dev:web": "pnpm --filter @lobsterfleet/web dev",
+    "build": "pnpm --filter @lobsterfleet/web build && pnpm --filter @lobsterfleet/server build",
+    "start": "pnpm --filter @lobsterfleet/server start",
+    "test": "pnpm -r test",
+    "check": "pnpm -r check"
+  },
+  "packageManager": "pnpm@10.23.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
