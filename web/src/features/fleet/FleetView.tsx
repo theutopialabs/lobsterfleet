@@ -1,12 +1,14 @@
 // Fleet view. Status strip + boxes grouped by operator + new crabbox sheet.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
-import type { InteractiveSession } from "../../lib/api";
+import type { Card, InteractiveSession } from "../../lib/api";
 import { sessionIsActive, sessionIsFinished } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button } from "../../components/Button";
 import { EmptyState } from "../../components/EmptyState";
+import { Field, Select } from "../../components/Field";
+import { Chip } from "../../components/Pill";
 import { Sheet } from "../../components/Sheet";
 import { Stat } from "../../components/Stat";
 import { BoxTile } from "./BoxTile";
@@ -16,9 +18,12 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
   const { state, refresh, toast } = useStore();
   const [sheetOpen, setSheetOpen] = useState(false);
   const [logsFor, setLogsFor] = useState<InteractiveSession | null>(null);
+  const [boardForId, setBoardForId] = useState<string | null>(null);
 
   const sessions = state?.interactiveSessions ?? [];
   const repos = state?.repos ?? [];
+  const cards = state?.cards ?? [];
+  const boardFor = boardForId ? (sessions.find((session) => session.id === boardForId) ?? null) : null;
 
   // Released boxes are gone. Keep their dead tiles out of the active grid. They
   // can still be purged for good with "Clear finished".
@@ -119,6 +124,7 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
                     session={s}
                     index={i}
                     onAttach={onAttach}
+                    onBoard={(session) => setBoardForId(session.id)}
                     onLogs={setLogsFor}
                   />
                 ))}
@@ -129,6 +135,8 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
       )}
 
       <NewBoxSheet open={sheetOpen} onClose={() => setSheetOpen(false)} repos={repos} />
+
+      <BoardLinkSheet session={boardFor} cards={cards} onClose={() => setBoardForId(null)} />
 
       <Sheet
         open={Boolean(logsFor)}
@@ -143,5 +151,158 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
         )}
       </Sheet>
     </div>
+  );
+}
+
+function BoardLinkSheet({
+  session,
+  cards,
+  onClose,
+}: {
+  session: InteractiveSession | null;
+  cards: Card[];
+  onClose: () => void;
+}) {
+  const { refresh, toast } = useStore();
+  const [cardId, setCardId] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const linkedIds = useMemo(
+    () => new Set((session?.boardLinks ?? []).map((link) => link.cardId)),
+    [session],
+  );
+  const availableCards = useMemo(
+    () => cards.filter((card) => !linkedIds.has(card.id)),
+    [cards, linkedIds],
+  );
+  const attachHint =
+    availableCards.length > 0
+      ? undefined
+      : cards.length > 0
+        ? "all cards linked"
+        : "no cards";
+  const emptyLabel = cards.length > 0 ? "All cards are linked" : "No cards";
+
+  useEffect(() => {
+    if (!session) {
+      setCardId("");
+      return;
+    }
+    setCardId((current) =>
+      current && availableCards.some((card) => card.id === current)
+        ? current
+        : (availableCards[0]?.id ?? ""),
+    );
+  }, [session, availableCards]);
+
+  const attach = async () => {
+    if (!session || !cardId) return;
+    setBusy("attach");
+    try {
+      await endpoints.attachCardLease(cardId, {
+        sessionId: session.id,
+        role: "primary",
+        source: "manual_attach",
+      });
+      toast(`Attached ${session.id} to ${cardId}`);
+      await refresh();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Could not attach to board", "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const detach = async (linkId: string, targetCardId: string) => {
+    setBusy(linkId);
+    try {
+      await endpoints.detachCardLease(targetCardId, linkId);
+      toast(`Detached ${session?.id ?? "session"} from ${targetCardId}`);
+      await refresh();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Could not detach from board", "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Sheet
+      open={Boolean(session)}
+      onClose={onClose}
+      title="Board link"
+      subtitle={session?.id}
+      footer={
+        <>
+          <Button variant="subtle" onClick={onClose}>
+            Close
+          </Button>
+          <Button variant="primary" busy={busy === "attach"} disabled={!cardId} onClick={attach}>
+            Attach
+          </Button>
+        </>
+      }
+    >
+      {session && (
+        <div className="flex flex-col gap-5">
+          <div className="rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-3">
+            <div className="text-sm font-medium text-[var(--color-ink)]">{session.repo}</div>
+            <div className="mt-1 text-xs text-[var(--color-muted)]">
+              {session.summary || session.purpose || session.id}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              <Chip mono>{session.id}</Chip>
+              <Chip>{session.status}</Chip>
+              {session.leaseId && <Chip mono>{session.leaseId}</Chip>}
+            </div>
+          </div>
+
+          {(session.boardLinks ?? []).length > 0 && (
+            <div className="flex flex-col gap-2">
+              <div className="text-xs font-medium uppercase tracking-wider text-[var(--color-faint)]">
+                Linked cards
+              </div>
+              {session.boardLinks.map((link) => (
+                <div
+                  key={link.id}
+                  className="flex items-center gap-3 rounded-xl border border-[var(--color-line)] bg-white/[0.02] px-3 py-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-[var(--color-ink)]">
+                      {link.cardTitle ?? link.cardId}
+                    </div>
+                    <div className="font-mono text-[11px] text-[var(--color-faint)]">
+                      {link.cardId}
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    busy={busy === link.id}
+                    onClick={() => detach(link.id, link.cardId)}
+                  >
+                    Detach
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Field label="Attach to card" hint={attachHint}>
+            <Select
+              value={cardId}
+              onChange={(e) => setCardId(e.target.value)}
+              disabled={availableCards.length === 0}
+            >
+              <option value="">{availableCards.length ? "Pick a card" : emptyLabel}</option>
+              {availableCards.map((card) => (
+                <option key={card.id} value={card.id}>
+                  {card.id} · {card.title}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+      )}
+    </Sheet>
   );
 }

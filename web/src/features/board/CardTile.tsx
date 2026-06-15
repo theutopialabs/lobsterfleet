@@ -38,6 +38,10 @@ export function CardTile({
   const totals = card.changes?.totals;
   const hasDiff = totals && totals.files > 0;
   const running = card.lane === "Running";
+  const leaseLinks = card.leaseLinks ?? [];
+  const attentionLink = leaseLinks.find((link) => link.session?.attentionState === "needs_input");
+  const attentionReason =
+    attentionLink?.session?.attentionReason || "Agent is waiting for input";
 
   const runAction = async (action: string, note: string) => {
     setBusy(action);
@@ -114,7 +118,27 @@ export function CardTile({
         <Chip>{runtimeLabel(card.runtime)}</Chip>
         <Chip>{mergePolicyLabel(card.policy)}</Chip>
         {card.run && <Chip mono>{card.run.id}</Chip>}
+        {leaseLinks.length > 0 && (
+          <Chip mono>
+            {leaseLinks.length === 1
+              ? (leaseLinks[0].sessionId ?? leaseLinks[0].leaseId ?? "lease")
+              : `${leaseLinks.length} leases`}
+          </Chip>
+        )}
       </div>
+
+      {attentionLink && (
+        <div
+          role="status"
+          className="mt-3 rounded-lg border border-[var(--color-warning)]/35 bg-[var(--color-warning)]/10 px-3 py-2 text-xs leading-snug text-[var(--color-warning)]"
+        >
+          <span className="font-medium">Needs input</span>
+          <span className="text-[var(--color-muted)]">
+            {" "}
+            - {attentionLink.sessionId ?? "session"} - {attentionReason}
+          </span>
+        </div>
+      )}
 
       {hasDiff && (
         <div className="mt-3 flex items-center gap-3 rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-3 py-2 text-[11px] tabular-nums">

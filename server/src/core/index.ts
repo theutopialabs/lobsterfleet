@@ -1,9 +1,11 @@
 import {
   Kysely,
+  type Selectable,
   SqliteAdapter,
   SqliteIntrospector,
   SqliteQueryCompiler,
   sql,
+  type ColumnType,
   type CompiledQuery,
   type DatabaseConnection,
   type DatabaseIntrospector,
@@ -24,6 +26,12 @@ import {
   encodeJsonPayload,
   encodeTerminalFrame,
 } from "./terminal-protocol";
+import {
+  terminalAttentionFingerprint,
+  terminalAttentionReason,
+  terminalInputClearsAttention,
+  type SessionAttentionState,
+} from "./attention";
 import {
   attributedTerminalInputPayloads,
   newTerminalInputState,
@@ -263,6 +271,42 @@ type RepoWorkflow = {
   updatedAt: number;
 };
 
+type BoardLeaseLinkRole = "primary" | "helper" | "review" | "manual";
+type BoardLeaseLinkSource = "card_run" | "manual_attach" | "new_crabbox";
+type BoardLeaseLinkStatus = "attached" | "detached" | "released";
+
+type BoardLeaseLinkSession = {
+  id: string;
+  repo: string;
+  branch: string;
+  runtime: "crabbox" | "crabbox-gui";
+  status: InteractiveSessionStatus;
+  attentionState: SessionAttentionState;
+  attentionReason: string;
+  attentionAt: number | null;
+  owner: string;
+  summary: string;
+  leaseId: string | null;
+  attachUrl: string | null;
+  vncUrl: string | null;
+};
+
+type BoardLeaseLink = {
+  id: string;
+  cardId: string;
+  cardTitle: string | null;
+  sessionId: string | null;
+  runId: string | null;
+  leaseId: string | null;
+  role: BoardLeaseLinkRole;
+  source: BoardLeaseLinkSource;
+  status: BoardLeaseLinkStatus;
+  attachedBy: string;
+  attachedAt: number;
+  detachedAt: number | null;
+  session: BoardLeaseLinkSession | null;
+};
+
 type Card = {
   id: string;
   title: string;
@@ -278,6 +322,7 @@ type Card = {
   logs: string[];
   changes: CardChanges;
   run: RunAttempt | null;
+  leaseLinks: BoardLeaseLink[];
 };
 
 type DiffFileStatus = "added" | "deleted" | "modified" | "renamed";
@@ -341,6 +386,9 @@ type InteractiveSession = {
   attachUrl: string | null;
   vncUrl: string | null;
   lastEvent: string;
+  attentionState: SessionAttentionState;
+  attentionReason: string;
+  attentionAt: number | null;
   createdAt: number;
   updatedAt: number;
   lastSeenAt: number;
@@ -360,6 +408,7 @@ type InteractiveSession = {
   sharedReadOnly?: boolean;
   logs: string[];
   logArchive: InteractiveSessionLogArchive | null;
+  boardLinks: BoardLeaseLink[];
 };
 
 type InteractiveSessionLogArchive = {
@@ -578,6 +627,36 @@ type RunAttemptTable = {
   error: string | null;
 };
 
+type BoardLeaseLinkTable = {
+  id: string;
+  card_id: string;
+  session_id: string | null;
+  run_id: string | null;
+  lease_id: string | null;
+  role: BoardLeaseLinkRole;
+  source: BoardLeaseLinkSource;
+  status: BoardLeaseLinkStatus;
+  attached_by: string;
+  attached_at: number;
+  detached_at: number | null;
+};
+
+type BoardLeaseLinkJoinedRow = BoardLeaseLinkTable & {
+  card_title: string | null;
+  session_repo: string | null;
+  session_branch: string | null;
+  session_runtime: "crabbox" | "crabbox-gui" | null;
+  session_status: InteractiveSessionStatus | null;
+  session_attention_state: SessionAttentionState | null;
+  session_attention_reason: string | null;
+  session_attention_at: number | null;
+  session_owner: string | null;
+  session_summary: string | null;
+  session_lease_id: string | null;
+  session_attach_url: string | null;
+  session_vnc_url: string | null;
+};
+
 type InteractiveSessionTable = {
   id: string;
   parent_session_id: string | null;
@@ -596,6 +675,10 @@ type InteractiveSessionTable = {
   attach_url: string | null;
   vnc_url: string | null;
   last_event: string;
+  attention_state: ColumnType<SessionAttentionState, SessionAttentionState | undefined, SessionAttentionState>;
+  attention_reason: ColumnType<string, string | undefined, string>;
+  attention_at: ColumnType<number | null, number | null | undefined, number | null>;
+  attention_fingerprint: ColumnType<string, string | undefined, string>;
   created_at: number;
   updated_at: number;
   last_seen_at: number;
@@ -611,6 +694,8 @@ type InteractiveSessionTable = {
   multiplayer_mode: number;
   agent_token_hash: string | null;
 };
+
+type InteractiveSessionRow = Selectable<InteractiveSessionTable>;
 
 type RepoWorkflowTable = {
   repo: string;
@@ -687,6 +772,7 @@ type Database = {
   sessions: SessionTable;
   cards: CardTable;
   run_attempts: RunAttemptTable;
+  board_lease_links: BoardLeaseLinkTable;
   interactive_sessions: InteractiveSessionTable;
   interactive_session_events: InteractiveSessionEventTable;
   interactive_session_log_archives: InteractiveSessionLogArchiveTable;
@@ -780,7 +866,13 @@ function defaultSizeClass(env: RuntimeEnv): string {
   }
   return options[0]?.id ?? "standard";
 }
-const mergePolicyOptions = ["open_pr", "merge_when_green", "fix_until_green_and_merge"] as const;
+const mergePolicyOptions = [
+  "open_pr",
+  "merge_when_green",
+  "fix_until_green_and_merge",
+  "open_draft_pr",
+  "fix_draft_pr_until_green",
+] as const;
 const defaultStallMs = 5 * 60 * 1000;
 const workflowCacheMs = 60 * 60 * 1000;
 // GUI crabbox: full graphical box, so vnc + desktop are on.
@@ -1641,6 +1733,35 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
   if (request.method === "POST" && url.pathname === "/api/cards") {
     requireRole(user, "maintainer");
     return json(await createCard(request, env, user), { status: 201 });
+  }
+
+  const cardLeaseLinksMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/lease-links$/);
+  if (request.method === "POST" && cardLeaseLinksMatch) {
+    requireRole(user, "maintainer");
+    return json(
+      await attachBoardLeaseLink(
+        request,
+        env,
+        user,
+        decodeURIComponent(cardLeaseLinksMatch[1] ?? ""),
+      ),
+      { status: 201 },
+    );
+  }
+
+  const cardLeaseLinkDetachMatch = url.pathname.match(
+    /^\/api\/cards\/([^/]+)\/lease-links\/([^/]+)$/,
+  );
+  if (request.method === "DELETE" && cardLeaseLinkDetachMatch) {
+    requireRole(user, "maintainer");
+    return json(
+      await detachBoardLeaseLink(
+        env,
+        user,
+        decodeURIComponent(cardLeaseLinkDetachMatch[1] ?? ""),
+        decodeURIComponent(cardLeaseLinkDetachMatch[2] ?? ""),
+      ),
+    );
   }
 
   const cardDeleteMatch = url.pathname.match(/^\/api\/cards\/([^/]+)$/);
@@ -2554,6 +2675,7 @@ async function createInteractiveSession(
     rootSessionId?: string;
     purpose?: string;
     summary?: string;
+    cardId?: string;
   }>(request);
   const githubToken = await sessionGitHubToken(request, env);
   if (user.subject.startsWith("github:") && !githubToken) {
@@ -2581,6 +2703,7 @@ async function createInteractiveSessionFromInput(
     rootSessionId?: string;
     purpose?: string;
     summary?: string;
+    cardId?: string;
   },
   githubToken?: string,
   options: {
@@ -2613,6 +2736,8 @@ async function createInteractiveSessionFromInput(
   const agentsMd = codexFileContent(body.agentsMd, 20_000);
   const purpose = interactiveSessionPurpose(body.purpose, prompt, repo, branch, command);
   const summary = interactiveSessionSummary(body.summary, purpose, prompt);
+  const cardId = clean(body.cardId, 120);
+  if (cardId && !(await readCard(env, cardId))) throw badRequest("board card not found");
   const owner = options.owner || actor(user);
   const createdBy = options.createdBy || actor(user);
   const lineage = await resolveInteractiveSessionLineage(
@@ -2728,6 +2853,14 @@ async function createInteractiveSessionFromInput(
         `interactive session created ${id} repo=${repo} runtime=${runtime}`,
         now,
       );
+      if (cardId) {
+        await createBoardLeaseLink(env, user, {
+          cardId,
+          sessionId: id,
+          source: "new_crabbox",
+          role: "primary",
+        });
+      }
       return {
         session: decorateInteractiveSession(
           (await readInteractiveSession(env, id)) as InteractiveSession,
@@ -2740,6 +2873,282 @@ async function createInteractiveSessionFromInput(
     }
   }
   throw new Error("failed to allocate interactive session id");
+}
+
+async function attachBoardLeaseLink(
+  request: Request,
+  env: RuntimeEnv,
+  user: User,
+  cardId: string,
+): Promise<{ card: Card; link: BoardLeaseLink }> {
+  const body = await readJson<{
+    sessionId?: string;
+    runId?: string;
+    leaseId?: string;
+    role?: string;
+    source?: string;
+  }>(request);
+  const link = await createBoardLeaseLink(env, user, {
+    cardId,
+    sessionId: body.sessionId,
+    runId: body.runId,
+    leaseId: body.leaseId,
+    role: body.role,
+    source: body.source,
+  });
+  return { card: (await readCard(env, link.cardId)) as Card, link };
+}
+
+async function detachBoardLeaseLink(
+  env: RuntimeEnv,
+  user: User,
+  cardId: string,
+  linkId: string,
+): Promise<{ ok: boolean; card: Card; linkId: string }> {
+  const cleanCardId = clean(cardId, 120);
+  const cleanLinkId = clean(linkId, 120);
+  const card = await readCard(env, cleanCardId);
+  if (!card) throw notFound("card not found");
+  const row = await database(env)
+    .selectFrom("board_lease_links")
+    .selectAll()
+    .where("id", "=", cleanLinkId)
+    .where("card_id", "=", card.id)
+    .where("status", "=", "attached")
+    .executeTakeFirst();
+  if (!row) throw notFound("board lease link not found");
+  const session = row.session_id ? await readInteractiveSession(env, row.session_id) : null;
+  if (session && !canManageInteractiveSession(user, session)) {
+    throw forbidden("session is not visible");
+  }
+  const now = Date.now();
+  await database(env)
+    .updateTable("board_lease_links")
+    .set({ status: "detached", detached_at: now })
+    .where("id", "=", row.id)
+    .where("status", "=", "attached")
+    .execute();
+  const label = row.session_id ?? row.run_id ?? row.lease_id ?? row.id;
+  await appendEvent(env, card.id, user, `lease detached ${label}`, now);
+  if (row.session_id) {
+    await appendInteractiveSessionEvent(env, row.session_id, user, `detached from board ${card.id}`, now);
+  }
+  await audit(env, user, `board lease detached ${row.id} card=${card.id}`, now);
+  return { ok: true, card: (await readCard(env, card.id)) as Card, linkId: row.id };
+}
+
+async function closeBoardLeaseLinksForSession(
+  env: RuntimeEnv,
+  user: User | null,
+  sessionId: string,
+  status: "detached" | "released",
+  now: number,
+  message: string,
+): Promise<void> {
+  const links = await database(env)
+    .selectFrom("board_lease_links")
+    .select(["id", "card_id"])
+    .where("session_id", "=", sessionId)
+    .where("status", "=", "attached")
+    .execute();
+  if (!links.length) return;
+  await database(env)
+    .updateTable("board_lease_links")
+    .set({ status, detached_at: now })
+    .where(
+      "id",
+      "in",
+      links.map((link) => link.id),
+    )
+    .execute();
+  const eventUser = user ?? systemUser();
+  await Promise.all(
+    links.map((link) => appendEvent(env, link.card_id, eventUser, `${message} ${sessionId}`, now)),
+  );
+}
+
+async function createBoardLeaseLink(
+  env: RuntimeEnv,
+  user: User,
+  input: {
+    cardId?: string;
+    sessionId?: string | null;
+    runId?: string | null;
+    leaseId?: string | null;
+    role?: string | null;
+    source?: string | null;
+  },
+): Promise<BoardLeaseLink> {
+  const cardId = clean(input.cardId, 120);
+  const card = cardId ? await readCard(env, cardId) : null;
+  if (!card) throw notFound("card not found");
+
+  const sessionId = clean(input.sessionId, 120) || null;
+  const runId = clean(input.runId, 120) || null;
+  let leaseId = clean(input.leaseId, 240) || null;
+  const role = oneOf(input.role, ["primary", "helper", "review", "manual"], "primary");
+  const source = oneOf(
+    input.source,
+    ["card_run", "manual_attach", "new_crabbox"],
+    sessionId ? "manual_attach" : "card_run",
+  );
+
+  const session = sessionId ? await readInteractiveSession(env, sessionId) : null;
+  if (sessionId && !session) throw notFound("interactive session not found");
+  if (session && !canManageInteractiveSession(user, session)) throw forbidden("session is not visible");
+  if (session && deadInteractiveSessionStatuses.includes(session.status)) {
+    throw badRequest(`session is ${session.status}`);
+  }
+  if (session && !leaseId) leaseId = session.leaseId;
+
+  const run = runId
+    ? await database(env)
+        .selectFrom("run_attempts")
+        .select(["id", "card_id", "lease_id"])
+        .where("id", "=", runId)
+        .executeTakeFirst()
+    : null;
+  if (runId && !run) throw notFound("run not found");
+  if (run && run.card_id !== card.id) throw badRequest("run belongs to another card");
+  if (run && !leaseId) leaseId = run.lease_id;
+  if (!sessionId && !runId && !leaseId) {
+    throw badRequest("sessionId, runId, or leaseId is required");
+  }
+
+  const db = database(env);
+  const existing = await findActiveBoardLeaseLink(env, card.id, { sessionId, runId, leaseId });
+  if (existing) {
+    if (!existing.lease_id && leaseId) {
+      await db
+        .updateTable("board_lease_links")
+        .set({ lease_id: leaseId })
+        .where("id", "=", existing.id)
+        .execute();
+    }
+    return (await readBoardLeaseLinkById(env, existing.id)) as BoardLeaseLink;
+  }
+
+  const now = Date.now();
+  const attachedBy = actor(user);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const id = newBoardLeaseLinkId();
+    try {
+      await db
+        .insertInto("board_lease_links")
+        .values({
+          id,
+          card_id: card.id,
+          session_id: sessionId,
+          run_id: runId,
+          lease_id: leaseId,
+          role,
+          source,
+          status: "attached",
+          attached_by: attachedBy,
+          attached_at: now,
+          detached_at: null,
+        })
+        .execute();
+      const label = sessionId ?? runId ?? leaseId ?? id;
+      await appendEvent(env, card.id, user, `lease attached ${label}`, now);
+      if (sessionId) {
+        await appendInteractiveSessionEvent(env, sessionId, user, `attached to board ${card.id}`, now);
+      }
+      await audit(env, user, `board lease attached ${id} card=${card.id}`, now);
+      return (await readBoardLeaseLinkById(env, id)) as BoardLeaseLink;
+    } catch (error) {
+      if (!isConstraintError(error) || attempt === 2) {
+        const duplicate = await findActiveBoardLeaseLink(env, card.id, { sessionId, runId, leaseId });
+        if (duplicate) return (await readBoardLeaseLinkById(env, duplicate.id)) as BoardLeaseLink;
+        throw error;
+      }
+    }
+  }
+  throw new Error("failed to create board lease link");
+}
+
+async function findActiveBoardLeaseLink(
+  env: RuntimeEnv,
+  cardId: string,
+  input: { sessionId: string | null; runId: string | null; leaseId: string | null },
+): Promise<BoardLeaseLinkTable | null> {
+  const db = database(env);
+  if (input.sessionId) {
+    return (
+      (await db
+        .selectFrom("board_lease_links")
+        .selectAll()
+        .where("card_id", "=", cardId)
+        .where("session_id", "=", input.sessionId)
+        .where("status", "=", "attached")
+        .executeTakeFirst()) ?? null
+    );
+  }
+  if (input.runId) {
+    return (
+      (await db
+        .selectFrom("board_lease_links")
+        .selectAll()
+        .where("card_id", "=", cardId)
+        .where("run_id", "=", input.runId)
+        .where("status", "=", "attached")
+        .executeTakeFirst()) ?? null
+    );
+  }
+  if (input.leaseId) {
+    return (
+      (await db
+        .selectFrom("board_lease_links")
+        .selectAll()
+        .where("card_id", "=", cardId)
+        .where("lease_id", "=", input.leaseId)
+        .where("status", "=", "attached")
+        .executeTakeFirst()) ?? null
+    );
+  }
+  return null;
+}
+
+async function readBoardLeaseLinkById(
+  env: RuntimeEnv,
+  id: string,
+): Promise<BoardLeaseLink | null> {
+  const result = await sql<BoardLeaseLinkJoinedRow>`
+    SELECT
+      links.id,
+      links.card_id,
+      links.session_id,
+      links.run_id,
+      links.lease_id,
+      links.role,
+      links.source,
+      links.status,
+      links.attached_by,
+      links.attached_at,
+      links.detached_at,
+      cards.title AS card_title,
+      sessions.repo AS session_repo,
+      sessions.branch AS session_branch,
+      sessions.runtime AS session_runtime,
+      sessions.status AS session_status,
+      sessions.attention_state AS session_attention_state,
+      sessions.attention_reason AS session_attention_reason,
+      sessions.attention_at AS session_attention_at,
+      sessions.owner AS session_owner,
+      sessions.summary AS session_summary,
+      sessions.lease_id AS session_lease_id,
+      sessions.attach_url AS session_attach_url,
+      sessions.vnc_url AS session_vnc_url
+    FROM board_lease_links links
+    LEFT JOIN cards ON cards.id = links.card_id
+    LEFT JOIN interactive_sessions sessions ON sessions.id = links.session_id
+    WHERE links.id = ${id}
+  `.execute(database(env));
+  return result.rows[0] ? boardLeaseLink(result.rows[0]) : null;
+}
+
+function newBoardLeaseLinkId(): string {
+  return `BL-${crypto.randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`;
 }
 
 async function resolveInteractiveSessionLineage(
@@ -2824,6 +3233,7 @@ async function cleanupInteractiveSessions(
       .deleteFrom("interactive_session_events")
       .where("session_id", "in", removedIds)
       .execute();
+    await db.deleteFrom("board_lease_links").where("session_id", "in", removedIds).execute();
     await db.deleteFrom("interactive_sessions").where("id", "in", removedIds).execute();
     await audit(env, user, `interactive sessions cleaned ${removedIds.join(",")}`, Date.now());
   }
@@ -3103,6 +3513,14 @@ async function mutateInteractiveSession(
     if (!canManage) throw forbidden("only the session owner or maintainer can stop");
     await unregisterInteractiveSessionCredentialPolicy(env, session);
     await releaseCrabboxLease(env, session.leaseId);
+    await closeBoardLeaseLinksForSession(
+      env,
+      user,
+      id,
+      "released",
+      now,
+      "linked lease released",
+    );
     await database(env)
       .updateTable("interactive_sessions")
       .set({
@@ -3280,6 +3698,11 @@ async function interactiveTerminalHub(
               error: "terminal control has not been granted",
             });
             return;
+          }
+          if (terminalInputClearsAttention(frame.payload)) {
+            void clearInteractiveSessionAttention(env, user, frame.sessionId).catch(
+              () => undefined,
+            );
           }
           if (subscription.upstream.readyState === WebSocket.OPEN) {
             const inputs = await multiplayerTerminalInputPayloads(
@@ -3474,10 +3897,15 @@ async function subscribeTerminalHubSession(
               sendTerminalJson(client, TerminalMessageType.Event, id, parsed);
               return;
             }
+            void observeInteractiveSessionOutput(env, user, id, data).catch(() => undefined);
             sendTerminalFrame(client, TerminalMessageType.Output, id, encoder.encode(data));
             return;
           }
-          sendTerminalFrame(client, TerminalMessageType.Output, id, new Uint8Array(data));
+          const output = new Uint8Array(data);
+          void observeInteractiveSessionOutput(env, user, id, decoder.decode(output)).catch(
+            () => undefined,
+          );
+          sendTerminalFrame(client, TerminalMessageType.Output, id, output);
         });
     });
     upstream.addEventListener("close", (event) => {
@@ -3638,8 +4066,138 @@ async function markInteractiveTerminalUnavailable(
       id: existing.id,
       leaseId: existing.lease_id,
     });
+    await closeBoardLeaseLinksForSession(
+      env,
+      user,
+      id,
+      "released",
+      now,
+      "linked lease expired",
+    );
   }
   await appendInteractiveSessionLog(env, id, user, message, now);
+}
+
+export async function observeInteractiveSessionOutput(
+  env: RuntimeEnv,
+  user: User | null,
+  id: string,
+  output: string,
+  now = Date.now(),
+): Promise<void> {
+  const reason = terminalAttentionReason(output);
+  if (!reason) return;
+  await markInteractiveSessionNeedsInput(
+    env,
+    user,
+    id,
+    now,
+    reason,
+    terminalAttentionFingerprint(output),
+  );
+}
+
+async function markInteractiveSessionNeedsInput(
+  env: RuntimeEnv,
+  user: User | null,
+  id: string,
+  now: number,
+  reason: string,
+  fingerprint: string,
+): Promise<void> {
+  const reasonText = clean(reason, 160) || "Waiting for input";
+  const existing = await database(env)
+    .selectFrom("interactive_sessions")
+    .select([
+      "status",
+      "attention_state",
+      "attention_reason",
+      "attention_at",
+      "attention_fingerprint",
+    ])
+    .where("id", "=", id)
+    .executeTakeFirst();
+  if (!existing || deadInteractiveSessionStatuses.includes(existing.status)) return;
+  const samePromptRecentlyHandled =
+    !existing.attention_state &&
+    existing.attention_fingerprint === fingerprint &&
+    existing.attention_at !== null &&
+    now - existing.attention_at < 10 * 60_000;
+  if (samePromptRecentlyHandled) return;
+  const alreadyFresh =
+    existing.attention_state === "needs_input" &&
+    existing.attention_reason === reasonText &&
+    existing.attention_at !== null &&
+    now - existing.attention_at < 5 * 60_000;
+  if (alreadyFresh) return;
+
+  const message = `agent needs input: ${reasonText}`;
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      attention_state: "needs_input",
+      attention_reason: reasonText,
+      attention_at: now,
+      attention_fingerprint: fingerprint,
+      updated_at: now,
+      last_seen_at: now,
+      last_event: message,
+    })
+    .where("id", "=", id)
+    .where("status", "not in", deadInteractiveSessionStatuses)
+    .execute();
+  await appendInteractiveSessionLog(env, id, user, message, now);
+  await appendBoardEventForSession(env, user, id, message, now);
+}
+
+export async function clearInteractiveSessionAttention(
+  env: RuntimeEnv,
+  user: User | null,
+  id: string,
+  now = Date.now(),
+): Promise<void> {
+  const existing = await database(env)
+    .selectFrom("interactive_sessions")
+    .select(["status", "attention_state"])
+    .where("id", "=", id)
+    .executeTakeFirst();
+  if (!existing || !existing.attention_state) return;
+  if (deadInteractiveSessionStatuses.includes(existing.status)) return;
+  const message = "agent input handled";
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      attention_state: "",
+      attention_reason: "",
+      attention_at: now,
+      updated_at: now,
+      last_seen_at: now,
+      last_event: message,
+    })
+    .where("id", "=", id)
+    .execute();
+  await appendInteractiveSessionLog(env, id, user, message, now);
+  await appendBoardEventForSession(env, user, id, message, now);
+}
+
+async function appendBoardEventForSession(
+  env: RuntimeEnv,
+  user: User | null,
+  sessionId: string,
+  message: string,
+  now: number,
+): Promise<void> {
+  const links = await database(env)
+    .selectFrom("board_lease_links")
+    .select("card_id")
+    .where("session_id", "=", sessionId)
+    .where("status", "=", "attached")
+    .execute();
+  if (!links.length) return;
+  const eventUser = user ?? systemUser();
+  await Promise.all(
+    links.map((link) => appendEvent(env, link.card_id, eventUser, `${message} ${sessionId}`, now)),
+  );
 }
 
 function terminalInputGrant(
@@ -4665,9 +5223,23 @@ async function deleteCard(
     .select(["lease_id"])
     .where("card_id", "=", card.id)
     .execute();
-  await Promise.all(runs.map((run) => releaseCrabboxLease(env, run.lease_id)));
+  const links = await db
+    .selectFrom("board_lease_links")
+    .select(["lease_id", "source"])
+    .where("card_id", "=", card.id)
+    .where("status", "=", "attached")
+    .execute();
+  const releaseIds = new Set<string>();
+  for (const run of runs) {
+    if (run.lease_id) releaseIds.add(run.lease_id);
+  }
+  for (const link of links) {
+    if (link.source === "card_run" && link.lease_id) releaseIds.add(link.lease_id);
+  }
+  await Promise.all([...releaseIds].map((leaseId) => releaseCrabboxLease(env, leaseId)));
 
   await db.transaction().execute(async (trx) => {
+    await trx.deleteFrom("board_lease_links").where("card_id", "=", card.id).execute();
     await trx.deleteFrom("events").where("card_id", "=", card.id).execute();
     await trx.deleteFrom("run_attempts").where("card_id", "=", card.id).execute();
     await trx.deleteFrom("cards").where("id", "=", card.id).execute();
@@ -5402,6 +5974,10 @@ async function readCards(env: RuntimeEnv): Promise<Card[]> {
     const line = `${new Date(row.created_at).toLocaleTimeString("en-GB")} ${row.message}`;
     logs.set(row.card_id, [...(logs.get(row.card_id) ?? []), line]);
   }
+  const links = await readBoardLeaseLinksForCards(
+    env,
+    cards.map((card) => card.id),
+  );
   return cards.map((card) => ({
     id: card.id,
     title: card.title,
@@ -5417,6 +5993,7 @@ async function readCards(env: RuntimeEnv): Promise<Card[]> {
     logs: logs.get(card.id) ?? [],
     changes: cardChanges(card.changed_files, ""),
     run: card.active_run_id ? (runs.get(card.active_run_id) ?? null) : null,
+    leaseLinks: links.get(card.id) ?? [],
   }));
 }
 
@@ -5444,6 +6021,7 @@ async function readCard(env: RuntimeEnv, id: string): Promise<Card | null> {
     .executeTakeFirst();
   if (!card) return null;
   const runs = await readRunsByIds(env, card.active_run_id ? [card.active_run_id] : []);
+  const links = await readBoardLeaseLinksForCards(env, [card.id]);
   const eventRows = (
     await sql<{ message: string; created_at: number }>`
       SELECT message, created_at
@@ -5474,6 +6052,7 @@ async function readCard(env: RuntimeEnv, id: string): Promise<Card | null> {
     ),
     changes: cardChanges(card.changed_files, card.diff_patch),
     run: card.active_run_id ? (runs.get(card.active_run_id) ?? null) : null,
+    leaseLinks: links.get(card.id) ?? [],
   };
 }
 
@@ -5509,6 +6088,79 @@ async function readRunsForCard(env: RuntimeEnv, cardId: string): Promise<RunAtte
   return rows.map(runAttempt);
 }
 
+async function readBoardLeaseLinksForCards(
+  env: RuntimeEnv,
+  cardIds: string[],
+): Promise<Map<string, BoardLeaseLink[]>> {
+  const uniqueIds = [...new Set(cardIds)].filter(Boolean);
+  if (!uniqueIds.length) return new Map();
+  const rows = await readBoardLeaseLinkRows(env, "card", uniqueIds);
+  const byCard = new Map<string, BoardLeaseLink[]>();
+  for (const row of rows) {
+    const link = boardLeaseLink(row);
+    byCard.set(link.cardId, [...(byCard.get(link.cardId) ?? []), link]);
+  }
+  return byCard;
+}
+
+async function readBoardLeaseLinksForSessions(
+  env: RuntimeEnv,
+  sessionIds: string[],
+): Promise<Map<string, BoardLeaseLink[]>> {
+  const uniqueIds = [...new Set(sessionIds)].filter(Boolean);
+  if (!uniqueIds.length) return new Map();
+  const rows = await readBoardLeaseLinkRows(env, "session", uniqueIds);
+  const bySession = new Map<string, BoardLeaseLink[]>();
+  for (const row of rows) {
+    const link = boardLeaseLink(row);
+    if (!link.sessionId) continue;
+    bySession.set(link.sessionId, [...(bySession.get(link.sessionId) ?? []), link]);
+  }
+  return bySession;
+}
+
+async function readBoardLeaseLinkRows(
+  env: RuntimeEnv,
+  key: "card" | "session",
+  ids: string[],
+): Promise<BoardLeaseLinkJoinedRow[]> {
+  const column = key === "card" ? sql.ref("links.card_id") : sql.ref("links.session_id");
+  const result = await sql<BoardLeaseLinkJoinedRow>`
+    SELECT
+      links.id,
+      links.card_id,
+      links.session_id,
+      links.run_id,
+      links.lease_id,
+      links.role,
+      links.source,
+      links.status,
+      links.attached_by,
+      links.attached_at,
+      links.detached_at,
+      cards.title AS card_title,
+      sessions.repo AS session_repo,
+      sessions.branch AS session_branch,
+      sessions.runtime AS session_runtime,
+      sessions.status AS session_status,
+      sessions.attention_state AS session_attention_state,
+      sessions.attention_reason AS session_attention_reason,
+      sessions.attention_at AS session_attention_at,
+      sessions.owner AS session_owner,
+      sessions.summary AS session_summary,
+      sessions.lease_id AS session_lease_id,
+      sessions.attach_url AS session_attach_url,
+      sessions.vnc_url AS session_vnc_url
+    FROM board_lease_links links
+    LEFT JOIN cards ON cards.id = links.card_id
+    LEFT JOIN interactive_sessions sessions ON sessions.id = links.session_id
+    WHERE ${column} IN (${sql.join(ids)})
+      AND links.status = 'attached'
+    ORDER BY links.attached_at DESC, links.id DESC
+  `.execute(database(env));
+  return result.rows;
+}
+
 async function readInteractiveSessions(
   env: RuntimeEnv,
   user?: User,
@@ -5528,9 +6180,16 @@ async function readInteractiveSessions(
     env,
     rows.map((row) => row.id),
   );
+  const links = await readBoardLeaseLinksForSessions(
+    env,
+    rows.map((row) => row.id),
+  );
   return rows.map((row) =>
     decorateInteractiveSession(
-      interactiveSession(row, logs.get(row.id) ?? [], archives.get(row.id) ?? null),
+      {
+        ...interactiveSession(row, logs.get(row.id) ?? [], archives.get(row.id) ?? null),
+        boardLinks: links.get(row.id) ?? [],
+      },
       user,
       env,
     ),
@@ -5549,7 +6208,11 @@ async function readInteractiveSession(
   if (!row) return null;
   const logs = await readInteractiveSessionLogs(env, [id]);
   const archives = await readInteractiveSessionLogArchives(env, [id]);
-  return interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
+  const links = await readBoardLeaseLinksForSessions(env, [id]);
+  return {
+    ...interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null),
+    boardLinks: links.get(id) ?? [],
+  };
 }
 
 async function readSharedInteractiveSession(
@@ -6476,8 +7139,44 @@ function runAttempt(row: RunAttemptTable): RunAttempt {
   };
 }
 
+function boardLeaseLink(row: BoardLeaseLinkJoinedRow): BoardLeaseLink {
+  const session =
+    row.session_id && row.session_repo && row.session_branch && row.session_runtime && row.session_status
+      ? {
+          id: row.session_id,
+          repo: row.session_repo,
+          branch: row.session_branch,
+          runtime: row.session_runtime,
+          status: row.session_status,
+          attentionState: oneOf(row.session_attention_state ?? "", ["", "needs_input"], ""),
+          attentionReason: row.session_attention_reason ?? "",
+          attentionAt: row.session_attention_at,
+          owner: row.session_owner ?? "",
+          summary: row.session_summary ?? "",
+          leaseId: row.session_lease_id,
+          attachUrl: row.session_attach_url,
+          vncUrl: row.session_vnc_url,
+        }
+      : null;
+  return {
+    id: row.id,
+    cardId: row.card_id,
+    cardTitle: row.card_title,
+    sessionId: row.session_id,
+    runId: row.run_id,
+    leaseId: row.lease_id ?? row.session_lease_id,
+    role: oneOf(row.role, ["primary", "helper", "review", "manual"], "primary"),
+    source: oneOf(row.source, ["card_run", "manual_attach", "new_crabbox"], "manual_attach"),
+    status: oneOf(row.status, ["attached", "detached", "released"], "attached"),
+    attachedBy: row.attached_by,
+    attachedAt: row.attached_at,
+    detachedAt: row.detached_at,
+    session,
+  };
+}
+
 function interactiveSession(
-  row: InteractiveSessionTable,
+  row: InteractiveSessionRow,
   logs: string[],
   logArchive: InteractiveSessionLogArchive | null = null,
 ): InteractiveSession {
@@ -6499,6 +7198,9 @@ function interactiveSession(
     attachUrl: row.attach_url,
     vncUrl: row.vnc_url,
     lastEvent: row.last_event,
+    attentionState: oneOf(row.attention_state, ["", "needs_input"], ""),
+    attentionReason: row.attention_reason,
+    attentionAt: row.attention_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastSeenAt: row.last_seen_at,
@@ -6513,6 +7215,7 @@ function interactiveSession(
     multiplayerMode: row.multiplayer_mode === 1,
     logs,
     logArchive,
+    boardLinks: [],
   };
 }
 
@@ -6549,7 +7252,7 @@ function archiveKeyPart(value: string): string {
 }
 
 function sessionLogTranscript(
-  session: InteractiveSession | InteractiveSessionTable,
+  session: InteractiveSession | InteractiveSessionRow,
   events: InteractiveSessionEventRow[],
 ): string {
   const parentSessionId =
@@ -6581,7 +7284,7 @@ function sessionLogTranscript(
 }
 
 function sessionLogSummary(
-  session: InteractiveSessionTable,
+  session: InteractiveSessionRow,
   events: InteractiveSessionEventRow[],
 ): Record<string, unknown> {
   return {

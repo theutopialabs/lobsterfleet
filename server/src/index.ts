@@ -1,13 +1,16 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { Client } from "ssh2";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   authorizeTerminalBridge,
+  clearInteractiveSessionAttention,
   handleRequest,
   isAllowedBrowserOrigin,
+  observeInteractiveSessionOutput,
   reconcileStalledRuns,
   type RuntimeEnv,
   type TerminalBridgeAuthorization,
@@ -26,6 +29,7 @@ import { attachSshBridge } from "./crabbox/sshBridge.js";
 import { CRABBOX_TMUX_SESSION } from "./crabbox/codexBootstrap.js";
 import { attachVncBridge } from "./crabbox/vncBridge.js";
 import { parseSshAttachUrl } from "./crabbox/provision.js";
+import { terminalInputClearsAttention } from "./core/attention.js";
 import {
   coordinatorLeaseIdFromSessionLease,
   heartbeatLease,
@@ -361,6 +365,14 @@ async function bridgeSession(ws: WebSocket, sessionId: string, canInput: boolean
       command: ATTACH_COMMAND,
       knownHostKey: leaseId ? knownHosts.get(leaseId) : null,
       onLearnHostKey: leaseId ? (hash) => knownHosts.set(leaseId, hash) : undefined,
+      onOutput: (output) => {
+        void observeInteractiveSessionOutput(env, null, sessionId, output).catch(() => undefined);
+      },
+      onInput: (payload) => {
+        if (terminalInputClearsAttention(payload)) {
+          void clearInteractiveSessionAttention(env, null, sessionId).catch(() => undefined);
+        }
+      },
       onReady: () => console.log(`[lobsterfleet] ssh bridge up for ${sessionId} -> ${parsed.host}`),
       onClose: () => console.log(`[lobsterfleet] ssh bridge closed for ${sessionId}`),
     },
@@ -595,10 +607,116 @@ async function bridgeSessionWithSize(
       command: ATTACH_COMMAND,
       knownHostKey: leaseId ? knownHosts.get(leaseId) : null,
       onLearnHostKey: leaseId ? (hash) => knownHosts.set(leaseId, hash) : undefined,
+      onOutput: (output) => {
+        void observeInteractiveSessionOutput(env, null, sessionId, output).catch(() => undefined);
+      },
+      onInput: (payload) => {
+        if (terminalInputClearsAttention(payload)) {
+          void clearInteractiveSessionAttention(env, null, sessionId).catch(() => undefined);
+        }
+      },
       onReady: () => console.log(`[lobsterfleet] ssh bridge up for ${sessionId} -> ${parsed.host}`),
       onClose: () => console.log(`[lobsterfleet] ssh bridge closed for ${sessionId}`),
     },
   );
+}
+
+type AttentionScanSession = {
+  id: string;
+  attach_url: string | null;
+  lease_id: string | null;
+  status: string;
+};
+
+const ATTENTION_SCAN_MS = 30 * 1000;
+const ATTENTION_SCAN_LIMIT = 20;
+const ATTENTION_CAPTURE_COMMAND = `tmux capture-pane -t ${CRABBOX_TMUX_SESSION} -p -J -S -120 2>/dev/null || true`;
+let attentionScanRunning = false;
+
+async function scanSessionAttention(): Promise<void> {
+  if (attentionScanRunning) return;
+  attentionScanRunning = true;
+  try {
+    const rows = await sessionsDb
+      .selectFrom("interactive_sessions")
+      .select(["id", "attach_url", "lease_id", "status"])
+      .where("status", "in", ["ready", "attached", "detached"])
+      .where("attach_url", "is not", null)
+      .limit(ATTENTION_SCAN_LIMIT)
+      .execute();
+    for (const row of rows) {
+      const output = await captureSessionPane(row);
+      if (!output) continue;
+      await observeInteractiveSessionOutput(env, null, row.id, output).catch(() => undefined);
+    }
+  } finally {
+    attentionScanRunning = false;
+  }
+}
+
+async function captureSessionPane(session: AttentionScanSession): Promise<string | null> {
+  const parsed = parseSshAttachUrl(session.attach_url);
+  if (!parsed) return null;
+  let privateKey: Buffer;
+  try {
+    privateKey = readFileSync(SSH_KEY_PATH);
+  } catch {
+    return null;
+  }
+  return new Promise((resolve) => {
+    const conn = new Client();
+    let settled = false;
+    const finish = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        conn.end();
+      } catch {
+        // already gone
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 12_000);
+    timer.unref();
+    conn.on("ready", () => {
+      conn.exec(ATTENTION_CAPTURE_COMMAND, (err, stream) => {
+        if (err || !stream) {
+          finish(null);
+          return;
+        }
+        let output = "";
+        const append = (chunk: Buffer): void => {
+          output = `${output}${chunk.toString("utf8")}`.slice(-24_000);
+        };
+        stream.on("data", append);
+        stream.stderr.on("data", append);
+        stream.on("close", () => finish(output));
+      });
+    });
+    conn.on("error", () => finish(null));
+    conn.on("close", () => finish(null));
+    conn.connect({
+      host: parsed.host,
+      port: parsed.port,
+      username: parsed.user,
+      privateKey,
+      readyTimeout: 10_000,
+      hostHash: "sha256",
+      hostVerifier: (data: Buffer | string): boolean => {
+        const leaseId = session.lease_id;
+        if (!leaseId) return true;
+        const hashedKey = typeof data === "string" ? data : data.toString("hex");
+        const known = knownHosts.get(leaseId);
+        if (!known) {
+          knownHosts.set(leaseId, hashedKey);
+          return true;
+        }
+        if (known === hashedKey) return true;
+        return false;
+      },
+    });
+  });
 }
 
 // Heartbeat timer: keep active crabbox leases alive while their sessions live.
@@ -628,6 +746,12 @@ setInterval(() => {
     console.error("[lobsterfleet] heartbeat error", error);
   });
 }, HEARTBEAT_MS).unref();
+
+setInterval(() => {
+  scanSessionAttention().catch((error) => {
+    console.error("[lobsterfleet] attention scan error", error);
+  });
+}, ATTENTION_SCAN_MS).unref();
 
 // Background reconcile: the handler runs it on /api/state too, but a timer keeps
 // stalled runs moving even when nobody is polling. Guard errors so it never

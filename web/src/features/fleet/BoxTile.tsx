@@ -14,23 +14,26 @@ import {
 } from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button } from "../../components/Button";
-import { Chip, StatePill } from "../../components/Pill";
+import { Chip, Pill, StatePill } from "../../components/Pill";
 
 export function BoxTile({
   session,
   index,
   onAttach,
+  onBoard,
   onLogs,
 }: {
   session: InteractiveSession;
   index: number;
   onAttach: (session: InteractiveSession) => void;
+  onBoard: (session: InteractiveSession) => void;
   onLogs: (session: InteractiveSession) => void;
 }) {
   const { refresh, toast } = useStore();
   const [busy, setBusy] = useState<string | null>(null);
   const active = sessionIsActive(session.status);
   const vnc = runtimeHasVnc(session.runtime) && active && session.vncUrl;
+  const needsInput = session.attentionState === "needs_input";
 
   // show the real box address once the lease lands, not a made-up command
   const sshHint = (() => {
@@ -74,7 +77,10 @@ export function BoxTile({
             {session.summary || session.purpose || session.id}
           </div>
         </div>
-        <StatePill status={session.status} label={sessionStatusLabel(session.status)} />
+        <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+          {needsInput && <Pill tone="warning">Needs input</Pill>}
+          <StatePill status={session.status} label={sessionStatusLabel(session.status)} />
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-1.5">
@@ -82,6 +88,11 @@ export function BoxTile({
         <Chip>⎇ {session.branch}</Chip>
         <Chip>{runtimeLabel(session.runtime)}</Chip>
         {session.multiplayerMode && <Chip>multiplayer</Chip>}
+        {(session.boardLinks ?? []).map((link) => (
+          <Chip key={link.id} mono>
+            {link.cardId}
+          </Chip>
+        ))}
       </div>
 
       <div className="flex items-center gap-3 text-[11px] text-[var(--color-faint)]">
@@ -102,9 +113,21 @@ export function BoxTile({
         <div className="truncate text-xs text-[var(--color-muted)]">{session.lastEvent}</div>
       )}
 
+      {needsInput && (
+        <div
+          role="status"
+          className="rounded-lg border border-[var(--color-warning)]/35 bg-[var(--color-warning)]/10 px-3 py-2 text-xs leading-snug text-[var(--color-warning)]"
+        >
+          {session.attentionReason || "Agent is waiting for input"}
+        </div>
+      )}
+
       <div className="mt-1 flex flex-wrap items-center gap-2">
         <Button size="sm" variant="primary" onClick={() => onAttach(session)} disabled={!active}>
           Attach
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => onBoard(session)}>
+          Board
         </Button>
         {vnc && (
           <Button

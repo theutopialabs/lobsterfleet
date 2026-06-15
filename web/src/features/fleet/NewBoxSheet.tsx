@@ -21,7 +21,7 @@ export function NewBoxSheet({
   onClose: () => void;
   repos: string[];
 }) {
-  const { refresh, toast } = useStore();
+  const { refresh, toast, state } = useStore();
   const [repo, setRepo] = useState("");
   const [branch, setBranch] = useState("main");
   const [runtime, setRuntime] = useState<string>("crabbox");
@@ -32,6 +32,7 @@ export function NewBoxSheet({
   const [aptUpgrade, setAptUpgrade] = useState(false);
   const [command, setCommand] = useState("codex --yolo");
   const [prompt, setPrompt] = useState("");
+  const [boardCardId, setBoardCardId] = useState("");
   const [agentsOpen, setAgentsOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [agentsMd, setAgentsMd] = useState("");
@@ -46,6 +47,7 @@ export function NewBoxSheet({
   const autoBranch = useRef("main");
   const agentsDirty = useRef(false);
   const configDirty = useRef(false);
+  const boardCards = useMemo(() => state?.cards ?? [], [state?.cards]);
 
   // Region + machine come from the broker's live catalog (Hetzner locations and
   // server types, or the local Docker runner). Hide regions with nothing
@@ -152,6 +154,7 @@ export function NewBoxSheet({
         prompt: prompt || undefined,
         configToml,
         agentsMd,
+        cardId: boardCardId || undefined,
       });
       toast("Crabbox requested. Provisioning through the broker.");
       onClose();
@@ -291,6 +294,17 @@ export function NewBoxSheet({
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="What should the agent work on?"
           />
+        </Field>
+
+        <Field label="Board card" hint="optional">
+          <Select value={boardCardId} onChange={(e) => setBoardCardId(e.target.value)}>
+            <option value="">No board link</option>
+            {boardCards.map((card) => (
+              <option key={card.id} value={card.id}>
+                {card.id} · {card.title}
+              </option>
+            ))}
+          </Select>
         </Field>
 
         <CodexFileBox

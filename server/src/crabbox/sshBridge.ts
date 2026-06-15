@@ -33,6 +33,10 @@ export type BridgeOpts = {
   onReady?: () => void;
   // Called when the bridge fully tears down (either side closed).
   onClose?: () => void;
+  // Called for output chunks so the app can spot prompts.
+  onOutput?: (output: string) => void;
+  // Called when an operator sends input.
+  onInput?: (payload: Uint8Array) => void;
   // The pinned host key hash for this box, or null if we have not seen it (TOFU).
   knownHostKey?: string | null;
   // Called on first connect with the box's host key hash so the caller pins it.
@@ -137,6 +141,7 @@ export function attachSshBridge(
       // box -> ws as Output frames (stdout and stderr both flow here)
       stream.on("data", (chunk: Buffer) => {
         if (ws.readyState !== ws.OPEN) return;
+        opts.onOutput?.(chunk.toString("utf8"));
         ws.send(
           encodeTerminalFrame({
             type: TerminalMessageType.Output,
@@ -147,6 +152,7 @@ export function attachSshBridge(
       });
       stream.stderr.on("data", (chunk: Buffer) => {
         if (ws.readyState !== ws.OPEN) return;
+        opts.onOutput?.(chunk.toString("utf8"));
         ws.send(
           encodeTerminalFrame({
             type: TerminalMessageType.Output,
@@ -183,6 +189,7 @@ export function attachSshBridge(
     if (!frame) return;
     if (frame.type === TerminalMessageType.Input) {
       if (!allowInput) return;
+      opts.onInput?.(frame.payload);
       shellStream?.write(Buffer.from(frame.payload));
     } else if (frame.type === TerminalMessageType.Resize) {
       if (!allowInput) return;

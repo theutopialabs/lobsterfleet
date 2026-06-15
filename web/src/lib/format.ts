@@ -21,6 +21,8 @@ export const MERGE_POLICY_OPTIONS = [
   "open_pr",
   "merge_when_green",
   "fix_until_green_and_merge",
+  "open_draft_pr",
+  "fix_draft_pr_until_green",
 ] as const;
 export const CARD_SOURCE_OPTIONS = ["Prompt", "Issue", "PR"] as const;
 
@@ -45,8 +47,10 @@ export function mergePolicyLabel(policy: string): string {
   return (
     {
       open_pr: "Open PR",
-      merge_when_green: "Merge when green",
-      fix_until_green_and_merge: "Fix until green",
+      merge_when_green: "Merge PR when green",
+      fix_until_green_and_merge: "Fix PR until green",
+      open_draft_pr: "Open draft PR",
+      fix_draft_pr_until_green: "Fix draft PR until green",
       guarded: "Guarded",
     }[policy] ?? policy
   );

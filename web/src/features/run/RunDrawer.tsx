@@ -3,17 +3,25 @@
 // capabilities grid, and actions (watch, take over, mark stalled).
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { Card, RuntimeCapabilities } from "../../lib/api";
-import { diffStatusChar, elapsed, mergePolicyLabel, runtimeLabel } from "../../lib/format";
+import {
+  diffStatusChar,
+  elapsed,
+  mergePolicyLabel,
+  runtimeLabel,
+  sessionIsFinished,
+  sessionStatusLabel,
+} from "../../lib/format";
 import { useStore } from "../../lib/store";
 import { Button, IconButton } from "../../components/Button";
+import { Field, Select } from "../../components/Field";
 import { Chip, StatePill } from "../../components/Pill";
 import { Segmented } from "../../components/Segmented";
 import { Terminal } from "../sessions/Terminal";
 
-type Tab = "output" | "diff" | "caps";
+type Tab = "output" | "diff" | "leases" | "caps";
 
 export function RunDrawer({ card, onClose }: { card: Card | null; onClose: () => void }) {
   const { refresh, toast } = useStore();
@@ -97,6 +105,7 @@ export function RunDrawer({ card, onClose }: { card: Card | null; onClose: () =>
                 options={[
                   { value: "output", label: "Output" },
                   { value: "diff", label: `Diff (${card.changes?.totals.files ?? 0})` },
+                  { value: "leases", label: `Leases (${card.leaseLinks?.length ?? 0})` },
                   { value: "caps", label: "Capabilities" },
                 ]}
               />
@@ -111,6 +120,7 @@ export function RunDrawer({ card, onClose }: { card: Card | null; onClose: () =>
             <div className="min-h-0 flex-1 overflow-auto px-6 py-5">
               {tab === "output" && <OutputPane card={card} />}
               {tab === "diff" && <DiffPane card={card} />}
+              {tab === "leases" && <LeasesPane card={card} />}
               {tab === "caps" && <CapsPane caps={caps} reason={run?.selectionReason} />}
             </div>
 
@@ -192,6 +202,162 @@ function LiveRunTerminal({ sessionId, onError }: { sessionId: string; onError: (
         if (s === "error") onError(note || "run terminal unavailable");
       }}
     />
+  );
+}
+
+function LeasesPane({ card }: { card: Card }) {
+  const { state, refresh, toast } = useStore();
+  const [sessionId, setSessionId] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const links = card.leaseLinks ?? [];
+  const linkedSessionIds = useMemo(
+    () => new Set(links.map((link) => link.sessionId).filter(Boolean)),
+    [links],
+  );
+  const activeSessions = useMemo(
+    () =>
+      (state?.interactiveSessions ?? []).filter((session) => !sessionIsFinished(session.status)),
+    [state?.interactiveSessions],
+  );
+  const sessions = useMemo(
+    () =>
+      activeSessions.filter((session) => !linkedSessionIds.has(session.id)),
+    [activeSessions, linkedSessionIds],
+  );
+  const attachHint =
+    sessions.length > 0
+      ? undefined
+      : activeSessions.length > 0
+        ? "all active sessions linked"
+        : "no active sessions";
+  const emptyLabel = activeSessions.length > 0 ? "All active sessions are linked" : "No active sessions";
+
+  useEffect(() => {
+    setSessionId((current) =>
+      current && sessions.some((session) => session.id === current)
+        ? current
+        : (sessions[0]?.id ?? ""),
+    );
+  }, [sessions]);
+
+  const attach = async () => {
+    if (!sessionId) return;
+    setBusy("attach");
+    try {
+      await endpoints.attachCardLease(card.id, {
+        sessionId,
+        role: "primary",
+        source: "manual_attach",
+      });
+      toast(`Attached ${sessionId} to ${card.id}`);
+      await refresh();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Could not attach lease", "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const detach = async (linkId: string) => {
+    setBusy(linkId);
+    try {
+      await endpoints.detachCardLease(card.id, linkId);
+      toast(`Detached lease from ${card.id}`);
+      await refresh();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Could not detach lease", "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {links.length === 0 ? (
+        <div className="grid place-items-center rounded-xl border border-dashed border-[var(--color-line)] py-12 text-sm text-[var(--color-faint)]">
+          No leases linked yet.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {links.map((link) => (
+            <div
+              key={link.id}
+              className="rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-3"
+            >
+              <div className="flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-[var(--color-ink)]">
+                    {link.session?.repo ?? link.leaseId ?? link.id}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-[var(--color-muted)]">
+                    {link.session?.summary || link.sessionId || link.runId || link.leaseId}
+                  </div>
+                </div>
+                {link.session && (
+                  <StatePill status={link.session.status} label={sessionStatusLabel(link.session.status)} />
+                )}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                <Chip mono>{link.id}</Chip>
+                {link.sessionId && <Chip mono>{link.sessionId}</Chip>}
+                {link.leaseId && <Chip mono>{link.leaseId}</Chip>}
+                <Chip>{link.source.replace("_", " ")}</Chip>
+                <Chip>{link.role}</Chip>
+              </div>
+              {link.session?.attentionState === "needs_input" && (
+                <div
+                  role="status"
+                  className="mt-3 rounded-lg border border-[var(--color-warning)]/35 bg-[var(--color-warning)]/10 px-3 py-2 text-xs leading-snug text-[var(--color-warning)]"
+                >
+                  <span className="font-medium">Needs input</span>
+                  <span className="text-[var(--color-muted)]">
+                    {" "}
+                    - {link.session.attentionReason || "Agent is waiting for input"}
+                  </span>
+                </div>
+              )}
+              <div className="mt-3">
+                <Button
+                  size="sm"
+                  variant="danger"
+                  busy={busy === link.id}
+                  onClick={() => detach(link.id)}
+                >
+                  Detach
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-3">
+        <div className="mb-3 text-xs font-medium uppercase tracking-wider text-[var(--color-faint)]">
+          Attach existing crabbox
+        </div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="min-w-0 flex-1">
+            <Field label="Session" hint={attachHint}>
+              <Select
+                value={sessionId}
+                onChange={(e) => setSessionId(e.target.value)}
+                disabled={sessions.length === 0}
+              >
+                <option value="">{sessions.length ? "Pick a session" : emptyLabel}</option>
+                {sessions.map((session) => (
+                  <option key={session.id} value={session.id}>
+                    {session.id} · {session.repo} · {sessionStatusLabel(session.status)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <Button variant="primary" busy={busy === "attach"} disabled={!sessionId} onClick={attach}>
+            Attach
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

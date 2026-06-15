@@ -98,6 +98,43 @@ export type RunAttempt = {
   error: string | null;
 };
 
+export type BoardLeaseLinkRole = "primary" | "helper" | "review" | "manual";
+export type BoardLeaseLinkSource = "card_run" | "manual_attach" | "new_crabbox";
+export type BoardLeaseLinkStatus = "attached" | "detached" | "released";
+export type SessionAttentionState = "" | "needs_input";
+
+export type BoardLeaseLinkSession = {
+  id: string;
+  repo: string;
+  branch: string;
+  runtime: "crabbox" | "crabbox-gui";
+  status: InteractiveSessionStatus;
+  attentionState: SessionAttentionState;
+  attentionReason: string;
+  attentionAt: number | null;
+  owner: string;
+  summary: string;
+  leaseId: string | null;
+  attachUrl: string | null;
+  vncUrl: string | null;
+};
+
+export type BoardLeaseLink = {
+  id: string;
+  cardId: string;
+  cardTitle: string | null;
+  sessionId: string | null;
+  runId: string | null;
+  leaseId: string | null;
+  role: BoardLeaseLinkRole;
+  source: BoardLeaseLinkSource;
+  status: BoardLeaseLinkStatus;
+  attachedBy: string;
+  attachedAt: number;
+  detachedAt: number | null;
+  session: BoardLeaseLinkSession | null;
+};
+
 // Board lane names. Order matters for advancing.
 export type Lane = "Todo" | "Running" | "Human Review" | "Done";
 
@@ -116,6 +153,7 @@ export type Card = {
   logs: string[];
   changes: CardChanges;
   run: RunAttempt | null;
+  leaseLinks: BoardLeaseLink[];
 };
 
 export type InteractiveSessionStatus =
@@ -146,6 +184,9 @@ export type InteractiveSession = {
   attachUrl: string | null;
   vncUrl: string | null;
   lastEvent: string;
+  attentionState: SessionAttentionState;
+  attentionReason: string;
+  attentionAt: number | null;
   createdAt: number;
   updatedAt: number;
   lastSeenAt: number;
@@ -165,6 +206,7 @@ export type InteractiveSession = {
   sharedReadOnly?: boolean;
   logs: string[];
   logArchive: { eventCount: number } | null;
+  boardLinks: BoardLeaseLink[];
 };
 
 export type FleetRuntime = "crabbox" | "crabbox-gui";
@@ -346,6 +388,7 @@ export const endpoints = {
     prompt?: string;
     configToml?: string;
     agentsMd?: string;
+    cardId?: string;
   }) => api.post<{ session: InteractiveSession }>("/api/interactive-sessions", body),
   sessionAction: (id: string, action: string) =>
     api.post<{ session: InteractiveSession }>(
@@ -373,6 +416,24 @@ export const endpoints = {
   }) => api.post<{ card: Card }>("/api/cards", body),
   deleteCard: (id: string) =>
     api.del<{ ok: boolean; removedId: string }>(`/api/cards/${encodeURIComponent(id)}`),
+  attachCardLease: (
+    id: string,
+    body: {
+      sessionId?: string;
+      runId?: string;
+      leaseId?: string;
+      role?: BoardLeaseLinkRole;
+      source?: BoardLeaseLinkSource;
+    },
+  ) =>
+    api.post<{ card: Card; link: BoardLeaseLink }>(
+      `/api/cards/${encodeURIComponent(id)}/lease-links`,
+      body,
+    ),
+  detachCardLease: (cardId: string, linkId: string) =>
+    api.del<{ ok: boolean; card: Card; linkId: string }>(
+      `/api/cards/${encodeURIComponent(cardId)}/lease-links/${encodeURIComponent(linkId)}`,
+    ),
   cardAction: (id: string, action: string) =>
     api.post<{ card: Card }>(`/api/cards/${encodeURIComponent(id)}/actions`, { action }),
   // Admin endpoints. They all return the fresh ServerState so callers can just
