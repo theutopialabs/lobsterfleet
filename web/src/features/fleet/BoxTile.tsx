@@ -3,6 +3,7 @@
 
 import { motion } from "framer-motion";
 import { useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { InteractiveSession } from "../../lib/api";
 import {
@@ -31,12 +32,13 @@ export function BoxTile({
 }) {
   const { refresh, toast } = useStore();
   const [busy, setBusy] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const active = sessionIsActive(session.status);
   const vnc = runtimeHasVnc(session.runtime) && active && session.vncUrl;
   const needsInput = session.attentionState === "needs_input";
 
   // show the real box address once the lease lands, not a made-up command
-  const sshHint = (() => {
+  const sshTarget = (() => {
     if (session.attachUrl?.startsWith("ssh://")) {
       try {
         const u = new URL(session.attachUrl);
@@ -45,8 +47,22 @@ export function BoxTile({
         // fall through to the generic hint
       }
     }
-    return session.leaseId ? "box leased · attach for a terminal" : "ssh target appears once provisioned";
+    return null;
   })();
+  const sshHint =
+    sshTarget ??
+    (session.leaseId ? "box leased · attach for a terminal" : "ssh target appears once provisioned");
+
+  const copySsh = async () => {
+    if (!sshTarget) return;
+    try {
+      await navigator.clipboard.writeText(`ssh ${sshTarget}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast("Could not copy to clipboard", "error");
+    }
+  };
 
   const runAction = async (action: string, note: string) => {
     setBusy(action);
@@ -67,9 +83,23 @@ export function BoxTile({
       layout
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
+      whileHover={{ y: -3 }}
       transition={{ delay: 0.03 * index, duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-      className="glass flex flex-col gap-3 rounded-2xl p-4"
+      className={`glass relative flex flex-col gap-3 overflow-hidden rounded-2xl p-4 transition-shadow duration-200 hover:shadow-[var(--shadow-float)] ${
+        needsInput ? "ring-1 ring-[var(--color-warning)]/40" : ""
+      }`}
     >
+      {/* left accent rail: coral when it wants attention, aqua when alive */}
+      <span
+        aria-hidden
+        className={`absolute inset-y-0 left-0 w-[3px] ${
+          needsInput
+            ? "bg-[var(--color-warning)]"
+            : active
+              ? "bg-[var(--color-accent-2)]/70"
+              : "bg-transparent"
+        }`}
+      />
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-[var(--color-ink)]">{session.repo}</div>
@@ -107,7 +137,27 @@ export function BoxTile({
         )}
       </div>
 
-      <div className="truncate font-mono text-[11px] text-[var(--color-faint)]">{sshHint}</div>
+      {sshTarget ? (
+        <button
+          type="button"
+          onClick={copySsh}
+          title="Copy ssh command"
+          className="group flex items-center gap-2 rounded-lg border border-[var(--color-line)] bg-white/[0.02] px-2.5 py-1.5 text-left font-mono text-[11px] text-[var(--color-muted)] transition hover:border-[var(--color-accent-2)]/40 hover:text-[var(--color-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/60"
+        >
+          <span className="shrink-0 text-[var(--color-accent-2)]">$</span>
+          <span className="truncate">ssh {sshTarget}</span>
+          {copied ? (
+            <Check size={13} className="ml-auto shrink-0 text-[var(--color-success)]" />
+          ) : (
+            <Copy
+              size={13}
+              className="ml-auto shrink-0 text-[var(--color-faint)] transition group-hover:text-[var(--color-accent-2)]"
+            />
+          )}
+        </button>
+      ) : (
+        <div className="truncate font-mono text-[11px] text-[var(--color-faint)]">{sshHint}</div>
+      )}
 
       {session.lastEvent && (
         <div className="truncate text-xs text-[var(--color-muted)]">{session.lastEvent}</div>

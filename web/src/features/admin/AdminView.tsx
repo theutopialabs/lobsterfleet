@@ -2,6 +2,7 @@
 // workflows. Each panel hits an /api/admin/* endpoint and then refreshes state.
 
 import { useEffect, useState } from "react";
+import { ShieldCheck } from "lucide-react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { AllowEntry, RepoWorkflow, Role, RuntimePreflight } from "../../lib/api";
 import { useStore } from "../../lib/store";
@@ -25,7 +26,7 @@ export function AdminView() {
     return (
       <div className="w-full pt-6">
         <EmptyState
-          glyph="⚙"
+          icon={<ShieldCheck size={26} strokeWidth={1.8} />}
           title="Owner only"
           body="Admin controls the allowlist, repos, policy and workflows. Ask an owner for access."
         />

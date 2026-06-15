@@ -2,6 +2,8 @@
 // In a self-hosted dev setup the dev identity login is the quick path in.
 
 import { useState } from "react";
+import { motion } from "framer-motion";
+import { Shell } from "lucide-react";
 import { endpoints } from "../lib/api";
 import { useStore } from "../lib/store";
 import { Button } from "../components/Button";
@@ -48,15 +50,22 @@ export function SignIn() {
   return (
     <div className="grid h-full w-full place-items-center px-4">
       <div className="aurora" />
-      <div className="glass w-full max-w-sm min-w-0 rounded-2xl p-5 sm:p-7">
-        <div className="mb-6 flex items-center gap-2">
-          <div className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--color-accent)]/15 text-[var(--color-accent-2)]">
-            ⬡
+      <motion.div
+        initial={{ opacity: 0, y: 14, scale: 0.985 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+        className="glass w-full max-w-sm min-w-0 rounded-2xl p-5 shadow-[var(--shadow-deep)] sm:p-7"
+      >
+        <div className="mb-6 flex items-center gap-2.5">
+          <div className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--color-accent)]/15 text-[var(--color-accent)] shadow-[0_0_28px_-8px_var(--color-accent)]">
+            <Shell size={21} strokeWidth={2.2} />
           </div>
           <span className="brand-gradient text-xl font-semibold tracking-tight">lobsterfleet</span>
         </div>
-        <h1 className="text-lg font-semibold">Sign in</h1>
-        <p className="mt-1 text-sm text-[var(--color-muted)]">Self-hosted control plane.</p>
+        <h1 className="text-2xl font-semibold tracking-tight">Mission control</h1>
+        <p className="mt-1.5 text-sm text-[var(--color-muted)]">
+          Lease boxes, attach a terminal, run agents. Your fleet, your hardware.
+        </p>
         <div className="mt-6 flex flex-col gap-4">
           {auth?.token && (
             <div className="flex flex-col gap-3">
@@ -99,7 +108,7 @@ export function SignIn() {
             </Button>
           )}
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }

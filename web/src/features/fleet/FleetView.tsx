@@ -1,6 +1,7 @@
 // Fleet view. Status strip + boxes grouped by operator + new crabbox sheet.
 
 import { useEffect, useMemo, useState } from "react";
+import { Boxes } from "lucide-react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { Card, InteractiveSession } from "../../lib/api";
 import { sessionIsActive, sessionIsFinished } from "../../lib/format";
@@ -94,6 +95,7 @@ export function FleetView({ onOpenSessions }: { onOpenSessions: () => void }) {
       {sessions.length === 0 ? (
         <div className="mt-6">
           <EmptyState
+            icon={<Boxes size={26} strokeWidth={1.8} />}
             title="No boxes leased yet"
             body="Lease a crabbox through the broker and a live workspace shows up here, grouped by operator."
             action={

@@ -76,7 +76,9 @@ export function StatePill({ status, label }: { status: string; label?: string })
   return (
     <Pill tone={tone}>
       <span
-        className={`h-1.5 w-1.5 rounded-full ${DOT_CLASS[tone]} ${live ? "animate-pulse" : ""}`}
+        className={`h-1.5 w-1.5 rounded-full ${DOT_CLASS[tone]} ${
+          live ? "live-dot shadow-[0_0_6px_currentColor]" : ""
+        }`}
       />
       {label ?? status}
     </Pill>

@@ -3,6 +3,7 @@
 // the grid to a single tall tile. New session reuses the New crabbox sheet.
 
 import { useMemo, useState } from "react";
+import { SquareTerminal } from "lucide-react";
 import type { InteractiveSession } from "../../lib/api";
 import { sessionIsActive } from "../../lib/format";
 import { useStore } from "../../lib/store";
@@ -84,7 +85,7 @@ export function SessionsView() {
       {live.length === 0 ? (
         <div className="mt-6">
           <EmptyState
-            glyph="▦"
+            icon={<SquareTerminal size={26} strokeWidth={1.8} />}
             title="No live sessions"
             body="Lease a crabbox and a live terminal lands here, ready to type into."
             action={
