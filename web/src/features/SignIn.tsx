@@ -2,6 +2,7 @@
 // In a self-hosted dev setup the dev identity login is the quick path in.
 
 import { useState } from "react";
+import { endpoints } from "../lib/api";
 import { useStore } from "../lib/store";
 import { Button } from "../components/Button";
 import { Field, Input } from "../components/Field";
@@ -89,7 +90,11 @@ export function SignIn() {
           )}
 
           {auth?.github && (
-            <Button variant="ghost" onClick={() => (window.location.href = "/login/github")} className="w-full">
+            <Button
+              variant="ghost"
+              onClick={() => (window.location.href = endpoints.githubLoginUrl())}
+              className="w-full"
+            >
               Continue with GitHub
             </Button>
           )}

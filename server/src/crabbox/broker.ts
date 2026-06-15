@@ -218,6 +218,7 @@ export async function createLease(env: BrokerEnv, opts: CreateLeaseOpts = {}): P
     ttlSeconds: opts.ttlSeconds ?? toInt(env.LOBSTERBOX_TTL_SECONDS, DEFAULT_TTL_SECONDS),
     idleSeconds: opts.idleTimeoutSeconds ?? toInt(env.LOBSTERBOX_IDLE_SECONDS, DEFAULT_IDLE_SECONDS),
     ...(workRoot ? { workRoot } : {}),
+    ...(opts.class ? { class: opts.class } : {}),
     ...(opts.aptUpgrade ? { aptUpgrade: true } : {}),
   };
   const out = (await request(env, "POST", "/api/leases", body, opts.owner)) as { lease?: unknown };

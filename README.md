@@ -156,6 +156,9 @@ uses. An agent can poll `/api/state`, create board cards, lease boxes, and attac
 to terminals over `/api/terminal/ws` without touching the browser. The UI is just
 one client. Point your agent at `http://<host>:8088/api` and it can run the fleet.
 
+For the full agent contract, including board cards, box creation, waiting for
+input, and terminal WebSocket frames, read [`docs/agent-api.md`](docs/agent-api.md).
+
 ## Data + backups
 
 Everything that needs to persist lives under `data/`:

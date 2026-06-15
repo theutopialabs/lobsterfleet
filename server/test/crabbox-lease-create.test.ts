@@ -80,6 +80,13 @@ describe("lobsterbox createLease", () => {
     assert.equal(cap.body().machine, "cx22");
   });
 
+  it("sends the requested size class and apt upgrade flag", async () => {
+    const cap = capture();
+    await createLease(baseEnv, { class: "fast", aptUpgrade: true });
+    assert.equal(cap.body().class, "fast");
+    assert.equal(cap.body().aptUpgrade, true);
+  });
+
   it("mirrors the numeric port onto sshPort so the ssh bridge can read it", async () => {
     capture();
     const lease = await createLease(baseEnv, {});

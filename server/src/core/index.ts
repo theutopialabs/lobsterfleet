@@ -280,6 +280,10 @@ type BoardLeaseLinkSession = {
   repo: string;
   branch: string;
   runtime: "crabbox" | "crabbox-gui";
+  size: string;
+  region: string;
+  machine: string;
+  aptUpgrade: boolean;
   status: InteractiveSessionStatus;
   attentionState: SessionAttentionState;
   attentionReason: string;
@@ -375,6 +379,10 @@ type InteractiveSession = {
   repo: string;
   branch: string;
   runtime: "crabbox" | "crabbox-gui";
+  size: string;
+  region: string;
+  machine: string;
+  aptUpgrade: boolean;
   command: string;
   prompt: string;
   purpose: string;
@@ -646,6 +654,10 @@ type BoardLeaseLinkJoinedRow = BoardLeaseLinkTable & {
   session_repo: string | null;
   session_branch: string | null;
   session_runtime: "crabbox" | "crabbox-gui" | null;
+  session_size: string | null;
+  session_region: string | null;
+  session_machine: string | null;
+  session_apt_upgrade: number | null;
   session_status: InteractiveSessionStatus | null;
   session_attention_state: SessionAttentionState | null;
   session_attention_reason: string | null;
@@ -664,6 +676,10 @@ type InteractiveSessionTable = {
   repo: string;
   branch: string;
   runtime: "crabbox" | "crabbox-gui";
+  size: ColumnType<string, string | undefined, string>;
+  region: ColumnType<string, string | undefined, string>;
+  machine: ColumnType<string, string | undefined, string>;
+  apt_upgrade: ColumnType<number, number | undefined, number>;
   command: string;
   prompt: string;
   purpose: string;
@@ -865,6 +881,22 @@ function defaultSizeClass(env: RuntimeEnv): string {
     return installDefault;
   }
   return options[0]?.id ?? "standard";
+}
+
+function defaultBoxRegion(env: RuntimeEnv): string {
+  if (crabboxConfigured(env as unknown as BrokerEnv)) {
+    return clean(env.LOBSTERBOX_REGION, 64) || "local";
+  }
+  if (env.CRABBOX_COORDINATOR_URL) return clean(env.CRABBOX_COORDINATOR_LOCATION, 64);
+  return "";
+}
+
+function defaultBoxMachine(env: RuntimeEnv): string {
+  if (crabboxConfigured(env as unknown as BrokerEnv)) {
+    return clean(env.LOBSTERBOX_MACHINE, 64) || "docker";
+  }
+  if (env.CRABBOX_COORDINATOR_URL) return clean(env.CRABBOX_COORDINATOR_SERVER_TYPE, 64);
+  return "";
 }
 const mergePolicyOptions = [
   "open_pr",
@@ -1401,6 +1433,10 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     return devIdentityLogin(request, env);
   }
 
+  if (request.method === "GET" && url.pathname === "/api/login/github") {
+    return githubLogin(request, env);
+  }
+
   if (request.method === "POST" && url.pathname === "/api/logout") {
     return logout(request, env);
   }
@@ -1649,6 +1685,16 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     return json(await cleanupInteractiveSessions(request, env, user));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/interactive-sessions") {
+    requireRole(user, "viewer");
+    return json({ sessions: await readInteractiveSessions(env, user) });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/boxes") {
+    requireRole(user, "viewer");
+    return json({ boxes: await readInteractiveSessions(env, user) });
+  }
+
   const interactiveSessionReadMatch = url.pathname.match(/^\/api\/interactive-sessions\/([^/]+)$/);
   if (request.method === "GET" && interactiveSessionReadMatch) {
     requireRole(user, "viewer");
@@ -1735,7 +1781,20 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     return json(await createCard(request, env, user), { status: 201 });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/cards") {
+    requireRole(user, "viewer");
+    return json({ cards: await readCards(env) });
+  }
+
   const cardLeaseLinksMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/lease-links$/);
+  if (request.method === "GET" && cardLeaseLinksMatch) {
+    requireRole(user, "viewer");
+    const cardId = decodeURIComponent(cardLeaseLinksMatch[1] ?? "");
+    const card = await readCard(env, cardId);
+    if (!card) throw notFound("card not found");
+    return json({ links: card.leaseLinks });
+  }
+
   if (request.method === "POST" && cardLeaseLinksMatch) {
     requireRole(user, "maintainer");
     return json(
@@ -1764,10 +1823,17 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     );
   }
 
-  const cardDeleteMatch = url.pathname.match(/^\/api\/cards\/([^/]+)$/);
-  if (request.method === "DELETE" && cardDeleteMatch) {
+  const cardMatch = url.pathname.match(/^\/api\/cards\/([^/]+)$/);
+  if (request.method === "GET" && cardMatch) {
+    requireRole(user, "viewer");
+    const card = await readCard(env, decodeURIComponent(cardMatch[1] ?? ""));
+    if (!card) throw notFound("card not found");
+    return json({ card });
+  }
+
+  if (request.method === "DELETE" && cardMatch) {
     requireRole(user, "maintainer");
-    return json(await deleteCard(env, user, decodeURIComponent(cardDeleteMatch[1] ?? "")));
+    return json(await deleteCard(env, user, decodeURIComponent(cardMatch[1] ?? "")));
   }
 
   const runsMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/runs$/);
@@ -2725,10 +2791,8 @@ async function createInteractiveSessionFromInput(
     crabboxSizeOptions(env).map((option) => option.id),
     defaultSizeClass(env),
   );
-  // lobsterbox catalog ids. Free-form values go to the broker for validation.
-  // Empty means the broker's configured defaults.
-  const region = clean(body.region, 64);
-  const machine = clean(body.machine, 64);
+  const region = clean(body.region, 64) || defaultBoxRegion(env);
+  const machine = clean(body.machine, 64) || defaultBoxMachine(env);
   const aptUpgrade = body.aptUpgrade === true;
   const command = interactiveCommand(body.command);
   const prompt = clean(body.prompt, 4000);
@@ -2762,6 +2826,10 @@ async function createInteractiveSessionFromInput(
           repo,
           branch,
           runtime,
+          size,
+          region,
+          machine,
+          apt_upgrade: aptUpgrade ? 1 : 0,
           command,
           prompt,
           purpose,
@@ -3130,6 +3198,10 @@ async function readBoardLeaseLinkById(
       sessions.repo AS session_repo,
       sessions.branch AS session_branch,
       sessions.runtime AS session_runtime,
+      sessions.size AS session_size,
+      sessions.region AS session_region,
+      sessions.machine AS session_machine,
+      sessions.apt_upgrade AS session_apt_upgrade,
       sessions.status AS session_status,
       sessions.attention_state AS session_attention_state,
       sessions.attention_reason AS session_attention_reason,
@@ -4730,6 +4802,14 @@ async function provisionInteractiveEndpoint(
   const runtime = oneOf(session.runtime, ["crabbox", "crabbox-gui"], "crabbox") as
     | "crabbox"
     | "crabbox-gui";
+  const size = oneOf(
+    session.size,
+    crabboxSizeOptions(env).map((option) => option.id),
+    defaultSizeClass(env),
+  );
+  const region = clean(session.region, 64) || defaultBoxRegion(env);
+  const machine = clean(session.machine, 64) || defaultBoxMachine(env);
+  const aptUpgrade = session.aptUpgrade === true;
   const command = interactiveCommand(session.command);
   const prompt = clean(session.prompt, 4000);
   const configToml = codexFileContent(session.configToml, 20_000);
@@ -4747,6 +4827,10 @@ async function provisionInteractiveEndpoint(
     repo,
     branch,
     runtime,
+    size,
+    ...(region ? { region } : {}),
+    ...(machine ? { machine } : {}),
+    ...(aptUpgrade ? { aptUpgrade: true } : {}),
     command,
     prompt,
     ...(configToml !== undefined ? { configToml } : {}),
@@ -4794,6 +4878,10 @@ async function provisionInteractivePayload(
       configToml: payload.configToml,
       agentsMd: payload.agentsMd,
       ...(payload.githubToken ? { githubToken: payload.githubToken } : {}),
+      ...(payload.size ? { size: payload.size } : {}),
+      ...(payload.region ? { region: payload.region } : {}),
+      ...(payload.machine ? { machine: payload.machine } : {}),
+      ...(payload.aptUpgrade ? { aptUpgrade: true } : {}),
     });
     await pinCrabboxHostKey(env, result.leaseId, result.hostKey);
     return {
@@ -4996,8 +5084,8 @@ function crabboxCoordinatorLeaseRequest(
   session: InteractiveProvisionRequest,
   sshPublicKey: string,
 ): Record<string, unknown> {
-  const serverType = clean(env.CRABBOX_COORDINATOR_SERVER_TYPE, 80);
-  const location = clean(env.CRABBOX_COORDINATOR_LOCATION, 80);
+  const serverType = clean(session.machine, 80) || clean(env.CRABBOX_COORDINATOR_SERVER_TYPE, 80);
+  const location = clean(session.region, 80) || clean(env.CRABBOX_COORDINATOR_LOCATION, 80);
   const providerKey = clean(env.CRABBOX_COORDINATOR_PROVIDER_KEY, 160);
   const workRoot = clean(env.CRABBOX_COORDINATOR_WORK_ROOT, 200);
   return compactRecord({
@@ -5008,7 +5096,7 @@ function crabboxCoordinatorLeaseRequest(
     // a floor for the GUI case (lets an operator force desktop env tweaks).
     desktop: crabboxWantsDesktop(session.runtime) && envFlag(env.CRABBOX_COORDINATOR_DESKTOP, true),
     desktopEnv: clean(env.CRABBOX_COORDINATOR_DESKTOP_ENV, 40) || "xfce",
-    class: clean(env.CRABBOX_COORDINATOR_CLASS, 80) || "standard",
+    class: clean(session.size, 80) || clean(env.CRABBOX_COORDINATOR_CLASS, 80) || "standard",
     ...(serverType ? { serverType, serverTypeExplicit: true } : {}),
     ...(location ? { location } : {}),
     ...(providerKey ? { providerKey } : {}),
@@ -6142,6 +6230,10 @@ async function readBoardLeaseLinkRows(
       sessions.repo AS session_repo,
       sessions.branch AS session_branch,
       sessions.runtime AS session_runtime,
+      sessions.size AS session_size,
+      sessions.region AS session_region,
+      sessions.machine AS session_machine,
+      sessions.apt_upgrade AS session_apt_upgrade,
       sessions.status AS session_status,
       sessions.attention_state AS session_attention_state,
       sessions.attention_reason AS session_attention_reason,
@@ -7147,6 +7239,10 @@ function boardLeaseLink(row: BoardLeaseLinkJoinedRow): BoardLeaseLink {
           repo: row.session_repo,
           branch: row.session_branch,
           runtime: row.session_runtime,
+          size: row.session_size ?? "",
+          region: row.session_region ?? "",
+          machine: row.session_machine ?? "",
+          aptUpgrade: row.session_apt_upgrade === 1,
           status: row.session_status,
           attentionState: oneOf(row.session_attention_state ?? "", ["", "needs_input"], ""),
           attentionReason: row.session_attention_reason ?? "",
@@ -7187,6 +7283,10 @@ function interactiveSession(
     repo: row.repo,
     branch: row.branch,
     runtime: row.runtime,
+    size: row.size,
+    region: row.region,
+    machine: row.machine,
+    aptUpgrade: row.apt_upgrade === 1,
     command: row.command,
     prompt: row.prompt,
     purpose: row.purpose,

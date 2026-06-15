@@ -99,6 +99,7 @@ export async function provisionCrabbox(
       owner: session.owner,
       desktop: wantsDesktop,
       desktopEnv: env.CRABBOX_COORDINATOR_DESKTOP_ENV || "xfce",
+      ...(session.size ? { class: session.size } : {}),
       ...(session.region ? { region: session.region } : {}),
       ...(session.machine ? { machine: session.machine } : {}),
       ...(session.aptUpgrade ? { aptUpgrade: true } : {}),

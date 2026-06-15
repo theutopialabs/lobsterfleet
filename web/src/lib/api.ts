@@ -108,6 +108,10 @@ export type BoardLeaseLinkSession = {
   repo: string;
   branch: string;
   runtime: "crabbox" | "crabbox-gui";
+  size: string;
+  region: string;
+  machine: string;
+  aptUpgrade: boolean;
   status: InteractiveSessionStatus;
   attentionState: SessionAttentionState;
   attentionReason: string;
@@ -173,6 +177,10 @@ export type InteractiveSession = {
   repo: string;
   branch: string;
   runtime: "crabbox" | "crabbox-gui";
+  size: string;
+  region: string;
+  machine: string;
+  aptUpgrade: boolean;
   command: string;
   prompt: string;
   purpose: string;
@@ -294,6 +302,20 @@ export type ServerState = {
   preflight?: RuntimePreflight | null;
 };
 
+export type InteractiveSessionEvent = {
+  actor: string;
+  message: string;
+  createdAt: number;
+};
+
+export type InteractiveSessionLogBundle = {
+  session: InteractiveSession;
+  events: InteractiveSessionEvent[];
+  archive: InteractiveSession["logArchive"];
+  eventCount: number;
+  truncated: boolean;
+};
+
 export type GitHubReference = {
   repo: string;
   number: number;
@@ -357,6 +379,7 @@ export const endpoints = {
   tokenLogin: (token: string) => api.post<{ user: User; auth: AuthMethods }>("/api/login/token", { token }),
   devLogin: (id: string, name: string, role: Role = "owner") =>
     api.post<{ user: User }>("/api/login/dev", { id, name, role }),
+  githubLoginUrl: () => "/api/login/github",
   logout: () => api.post<{ ok: boolean }>("/api/logout"),
   githubRefs: (number: number) =>
     api.get<{ matches: GitHubReference[] }>(`/api/github/refs?number=${number}`),
@@ -390,6 +413,16 @@ export const endpoints = {
     agentsMd?: string;
     cardId?: string;
   }) => api.post<{ session: InteractiveSession }>("/api/interactive-sessions", body),
+  sessions: () => api.get<{ sessions: InteractiveSession[] }>("/api/interactive-sessions"),
+  boxes: () => api.get<{ boxes: InteractiveSession[] }>("/api/boxes"),
+  session: (id: string) =>
+    api.get<{ session: InteractiveSession }>(
+      `/api/interactive-sessions/${encodeURIComponent(id)}`,
+    ),
+  sessionLogs: (id: string) =>
+    api.get<InteractiveSessionLogBundle>(
+      `/api/interactive-sessions/${encodeURIComponent(id)}/logs`,
+    ),
   sessionAction: (id: string, action: string) =>
     api.post<{ session: InteractiveSession }>(
       `/api/interactive-sessions/${encodeURIComponent(id)}/actions`,
@@ -406,6 +439,8 @@ export const endpoints = {
     api.get<{ session: InteractiveSession }>(
       `/api/shared-sessions/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`,
     ),
+  cards: () => api.get<{ cards: Card[] }>("/api/cards"),
+  card: (id: string) => api.get<{ card: Card }>(`/api/cards/${encodeURIComponent(id)}`),
   createCard: (body: {
     repo: string;
     prompt: string;
@@ -430,12 +465,18 @@ export const endpoints = {
       `/api/cards/${encodeURIComponent(id)}/lease-links`,
       body,
     ),
+  cardLeaseLinks: (id: string) =>
+    api.get<{ links: BoardLeaseLink[] }>(
+      `/api/cards/${encodeURIComponent(id)}/lease-links`,
+    ),
   detachCardLease: (cardId: string, linkId: string) =>
     api.del<{ ok: boolean; card: Card; linkId: string }>(
       `/api/cards/${encodeURIComponent(cardId)}/lease-links/${encodeURIComponent(linkId)}`,
     ),
   cardAction: (id: string, action: string) =>
     api.post<{ card: Card }>(`/api/cards/${encodeURIComponent(id)}/actions`, { action }),
+  cardRuns: (id: string) =>
+    api.get<{ runs: RunAttempt[] }>(`/api/cards/${encodeURIComponent(id)}/runs`),
   // Admin endpoints. They all return the fresh ServerState so callers can just
   // refresh() afterwards.
   addAllow: (value: string, role: Role) => api.post<ServerState>("/api/admin/allow", { value, role }),
