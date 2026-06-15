@@ -33,4 +33,18 @@ describe("vnc byte reader", () => {
     await assert.rejects(pending, /closed/);
     await assert.rejects(() => reader.read(1), /closed/);
   });
+
+  it("cancels instead of buffering without bound", async () => {
+    const reader = byteReader();
+    // Ask for one huge read that the dribble below will never satisfy.
+    const pending = reader.read(64 * 1024 * 1024);
+
+    // Feed 9MB in chunks. Past the 8MB cap the reader should bail out instead
+    // of growing the buffer forever.
+    const chunk = Buffer.alloc(1024 * 1024);
+    for (let i = 0; i < 9; i++) reader.feed(chunk);
+
+    await assert.rejects(pending, /overflow/);
+    await assert.rejects(() => reader.read(1), /overflow/);
+  });
 });

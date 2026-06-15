@@ -741,28 +741,71 @@ async function heartbeatActiveLeases(): Promise<void> {
     await heartbeatLease(brokerEnv, id).catch(() => undefined);
   }
 }
-setInterval(() => {
+const heartbeatTimer = setInterval(() => {
   heartbeatActiveLeases().catch((error) => {
     console.error("[lobsterfleet] heartbeat error", error);
   });
-}, HEARTBEAT_MS).unref();
+}, HEARTBEAT_MS);
+heartbeatTimer.unref();
 
-setInterval(() => {
+const attentionTimer = setInterval(() => {
   scanSessionAttention().catch((error) => {
     console.error("[lobsterfleet] attention scan error", error);
   });
-}, ATTENTION_SCAN_MS).unref();
+}, ATTENTION_SCAN_MS);
+attentionTimer.unref();
 
 // Background reconcile: the handler runs it on /api/state too, but a timer keeps
 // stalled runs moving even when nobody is polling. Guard errors so it never
 // crashes the process.
 const RECONCILE_MS = 5 * 60 * 1000;
-setInterval(() => {
+const reconcileTimer = setInterval(() => {
   reconcileStalledRuns(env, Date.now()).catch((error) => {
     console.error("[lobsterfleet] reconcile error", error);
   });
-}, RECONCILE_MS).unref();
+}, RECONCILE_MS);
+reconcileTimer.unref();
 
 server.listen(PORT, () => {
   console.log(`[lobsterfleet] listening on http://localhost:${PORT}`);
 });
+
+// Graceful shutdown: on SIGTERM/SIGINT (systemd restart, Ctrl-C, container stop)
+// stop the timers, stop taking new connections, tell live websockets to go away,
+// and close the db so WAL gets checkpointed. Without this a deploy hard-kills the
+// process mid-write and can orphan leases in the broker.
+let shuttingDown = false;
+function gracefulShutdown(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[lobsterfleet] ${signal} received, shutting down`);
+  clearInterval(heartbeatTimer);
+  clearInterval(attentionTimer);
+  clearInterval(reconcileTimer);
+  for (const ws of wss.clients) {
+    try {
+      ws.close(1001, "server shutting down");
+    } catch {
+      // best effort, the socket may already be gone
+    }
+  }
+  // Force-exit if connections refuse to drain in time so the supervisor doesn't
+  // have to SIGKILL us.
+  const forceExit = setTimeout(() => {
+    console.error("[lobsterfleet] shutdown timed out, forcing exit");
+    process.exit(1);
+  }, 10_000);
+  forceExit.unref();
+  server.close(() => {
+    try {
+      // Closing the raw handle checkpoints the WAL back into the main db file.
+      raw.close();
+    } catch (error) {
+      console.error("[lobsterfleet] error closing database", error);
+    }
+    clearTimeout(forceExit);
+    process.exit(0);
+  });
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

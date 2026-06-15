@@ -14,6 +14,10 @@ import {
 // ssh stdout/stderr -> Output frames. ws Input -> stream.write. Resize -> setWindow.
 // Either side closing tears down both.
 
+// When the browser's receive buffer backs up past this, we pause the ssh stream
+// instead of letting unsent output pile up in our heap.
+const WS_HIGH_WATER_BYTES = 8 * 1024 * 1024;
+
 export type SshTarget = {
   host: string;
   port: number;
@@ -138,8 +142,20 @@ export function attachSshBridge(
       opts.onReady?.();
       sendEvent(ws, sessionId, "ready", "ssh terminal connected");
 
-      // box -> ws as Output frames (stdout and stderr both flow here)
-      stream.on("data", (chunk: Buffer) => {
+      // box -> ws as Output frames (stdout and stderr both flow here).
+      // Backpressure: if the browser falls behind, ws.bufferedAmount climbs.
+      // Past the high-water mark we pause the ssh stream so output buffers on
+      // the box (which has its own flow control) instead of growing our heap.
+      // The per-send callback resumes us once the socket drains.
+      let paused = false;
+      const resumeIfDrained = (): void => {
+        if (paused && ws.bufferedAmount < WS_HIGH_WATER_BYTES / 2) {
+          paused = false;
+          stream.resume();
+          stream.stderr.resume();
+        }
+      };
+      const pump = (chunk: Buffer): void => {
         if (ws.readyState !== ws.OPEN) return;
         opts.onOutput?.(chunk.toString("utf8"));
         ws.send(
@@ -148,19 +164,16 @@ export function attachSshBridge(
             sessionId,
             payload: new Uint8Array(chunk),
           }),
+          resumeIfDrained,
         );
-      });
-      stream.stderr.on("data", (chunk: Buffer) => {
-        if (ws.readyState !== ws.OPEN) return;
-        opts.onOutput?.(chunk.toString("utf8"));
-        ws.send(
-          encodeTerminalFrame({
-            type: TerminalMessageType.Output,
-            sessionId,
-            payload: new Uint8Array(chunk),
-          }),
-        );
-      });
+        if (!paused && ws.bufferedAmount > WS_HIGH_WATER_BYTES) {
+          paused = true;
+          stream.pause();
+          stream.stderr.pause();
+        }
+      };
+      stream.on("data", pump);
+      stream.stderr.on("data", pump);
 
       stream.on("close", () => {
         sendEvent(ws, sessionId, "exit", "ssh session closed");

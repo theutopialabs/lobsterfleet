@@ -56,6 +56,15 @@ type PendingRead = {
   reject: (error: Error) => void;
 };
 
+// Backlog cap for the handshake reader. A well-behaved VNC server never gets
+// close to this. It only bites a slow/hostile server dripping bytes that never
+// satisfy a read, which would otherwise grow the buffer without bound.
+const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+
+// When the browser's receive buffer backs up past this, pause the forwarded VNC
+// channel so framebuffer data doesn't pile up in our heap.
+const WS_HIGH_WATER_BYTES = 8 * 1024 * 1024;
+
 export function byteReader(): ByteReader {
   let buf = Buffer.alloc(0);
   let canceled: Error | null = null;
@@ -70,10 +79,21 @@ export function byteReader(): ByteReader {
       want.resolve(out);
     }
   };
+  const cancel = (reason = new Error("byte reader canceled")): void => {
+    if (canceled) return;
+    canceled = reason;
+    buf = Buffer.alloc(0);
+    const pending = wants.splice(0);
+    for (const want of pending) want.reject(reason);
+  };
   return {
     feed(b) {
       if (canceled) return;
       buf = Buffer.concat([buf, b]);
+      if (buf.length > MAX_BUFFER_BYTES) {
+        cancel(new Error("vnc byte reader buffer overflow"));
+        return;
+      }
       pump();
     },
     read(n) {
@@ -92,13 +112,7 @@ export function byteReader(): ByteReader {
       buf = Buffer.alloc(0);
       return b;
     },
-    cancel(reason = new Error("byte reader canceled")) {
-      if (canceled) return;
-      canceled = reason;
-      buf = Buffer.alloc(0);
-      const pending = wants.splice(0);
-      for (const want of pending) want.reject(reason);
-    },
+    cancel,
   };
 }
 
@@ -210,9 +224,25 @@ export function attachVncBridge(
           return;
         }
         boxStream = stream;
+        // Backpressure on the framebuffer stream: if the browser can't keep up,
+        // pause the forwarded channel rather than buffering pixels in our heap.
+        let paused = false;
         stream.on("data", (chunk: Buffer) => {
-          if (phase === "pipe") wsSend(chunk);
-          else boxReader.feed(chunk);
+          if (phase !== "pipe") {
+            boxReader.feed(chunk);
+            return;
+          }
+          if (ws.readyState !== ws.OPEN) return;
+          ws.send(chunk, () => {
+            if (paused && ws.bufferedAmount < WS_HIGH_WATER_BYTES / 2) {
+              paused = false;
+              stream.resume();
+            }
+          });
+          if (!paused && ws.bufferedAmount > WS_HIGH_WATER_BYTES) {
+            paused = true;
+            stream.pause();
+          }
         });
         stream.on("close", () => teardown());
         stream.on("error", () => teardown());

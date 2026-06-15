@@ -141,5 +141,9 @@ export function openDatabaseWithHandle(path: string): { db: Kysely<unknown>; raw
   const sqlite = new DatabaseSync(path);
   sqlite.exec("pragma journal_mode = WAL");
   sqlite.exec("pragma foreign_keys = ON");
+  // WAL still serializes writers. Without this, two writes racing (e.g. the
+  // heartbeat and attention timers firing together) throw SQLITE_BUSY right
+  // away. busy_timeout makes the driver wait-and-retry instead of failing.
+  sqlite.exec("pragma busy_timeout = 5000");
   return { db: new Kysely<unknown>({ dialect: new NodeSqliteDialect(sqlite) }), raw: sqlite };
 }

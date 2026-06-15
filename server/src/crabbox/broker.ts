@@ -100,6 +100,8 @@ function toInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+const BROKER_TIMEOUT_MS = 30_000;
+
 // Throws a clear error on non-2xx, including the response body so we can see why.
 async function request(
   env: BrokerEnv,
@@ -108,11 +110,22 @@ async function request(
   body?: unknown,
   ownerOverride?: string,
 ): Promise<unknown> {
-  const res = await fetch(`${baseUrl(env)}${path}`, {
-    method,
-    headers: authHeaders(env, ownerOverride),
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
+  // Time-box every broker call. Without this a hung broker stalls the heartbeat
+  // and provision paths for the full TCP timeout (minutes), backing up the queue.
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl(env)}${path}`, {
+      method,
+      headers: authHeaders(env, ownerOverride),
+      signal: AbortSignal.timeout(BROKER_TIMEOUT_MS),
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error(`lobsterbox ${method} ${path} -> timed out after ${BROKER_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  }
   const text = await res.text();
   if (!res.ok) {
     throw new Error(describeBrokerError(method, path, res.status, text));
