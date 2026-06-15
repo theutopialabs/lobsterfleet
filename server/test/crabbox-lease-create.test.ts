@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { createLease, type BrokerEnv } from "../src/crabbox/broker.js";
+import { createLease, getLease, type BrokerEnv } from "../src/crabbox/broker.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -116,6 +116,27 @@ describe("lobsterbox createLease", () => {
       throw error;
     }) as typeof fetch;
     await assert.rejects(createLease(baseEnv, {}), /timed out/);
+  });
+
+  // Creating a lease boots a real cloud VM and waits for ssh, which takes longer
+  // than the 30s default. Booting Hetzner used to time out at 30s and orphan the
+  // box, so createLease gets a much longer window than quick calls like getLease.
+  it("gives lease creation a longer timeout than quick calls", async () => {
+    const timeoutError = () => {
+      const error = new Error("aborted");
+      error.name = "TimeoutError";
+      throw error;
+    };
+    globalThis.fetch = (async () => timeoutError()) as typeof fetch;
+
+    let leaseMsg = "";
+    await createLease(baseEnv, {}).catch((e: Error) => (leaseMsg = e.message));
+    let getMsg = "";
+    await getLease(baseEnv, "cbx_1").catch((e: Error) => (getMsg = e.message));
+
+    const leaseMs = Number(leaseMsg.match(/after (\d+)ms/)?.[1] ?? 0);
+    const getMs = Number(getMsg.match(/after (\d+)ms/)?.[1] ?? 0);
+    assert.ok(leaseMs > getMs, `lease timeout ${leaseMs}ms should exceed quick-call ${getMs}ms`);
   });
 
   it("surfaces lobsterbox's clean JSON error", async () => {

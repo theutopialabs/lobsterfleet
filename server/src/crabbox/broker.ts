@@ -100,7 +100,11 @@ function toInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+// Default time-box for quick calls (get/list/release/heartbeat). Creating a lease
+// is different: the broker boots a real cloud VM and waits for it to be ssh-ready,
+// which takes well over 30s on Hetzner. Those calls pass a longer timeout.
 const BROKER_TIMEOUT_MS = 30_000;
+const BROKER_LEASE_TIMEOUT_MS = 240_000;
 
 // Throws a clear error on non-2xx, including the response body so we can see why.
 async function request(
@@ -109,6 +113,7 @@ async function request(
   path: string,
   body?: unknown,
   ownerOverride?: string,
+  timeoutMs: number = BROKER_TIMEOUT_MS,
 ): Promise<unknown> {
   // Time-box every broker call. Without this a hung broker stalls the heartbeat
   // and provision paths for the full TCP timeout (minutes), backing up the queue.
@@ -117,12 +122,12 @@ async function request(
     res = await fetch(`${baseUrl(env)}${path}`, {
       method,
       headers: authHeaders(env, ownerOverride),
-      signal: AbortSignal.timeout(BROKER_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
   } catch (error) {
     if (error instanceof Error && error.name === "TimeoutError") {
-      throw new Error(`lobsterbox ${method} ${path} -> timed out after ${BROKER_TIMEOUT_MS}ms`);
+      throw new Error(`lobsterbox ${method} ${path} -> timed out after ${timeoutMs}ms`);
     }
     throw error;
   }
@@ -234,7 +239,9 @@ export async function createLease(env: BrokerEnv, opts: CreateLeaseOpts = {}): P
     ...(opts.class ? { class: opts.class } : {}),
     ...(opts.aptUpgrade ? { aptUpgrade: true } : {}),
   };
-  const out = (await request(env, "POST", "/api/leases", body, opts.owner)) as { lease?: unknown };
+  const out = (await request(env, "POST", "/api/leases", body, opts.owner, BROKER_LEASE_TIMEOUT_MS)) as {
+    lease?: unknown;
+  };
   if (!(out.lease as Lease | undefined)?.id) {
     throw new Error("lobsterbox create lease: missing lease in response");
   }
