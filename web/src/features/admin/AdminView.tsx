@@ -2,7 +2,7 @@
 // workflows. Each panel hits an /api/admin/* endpoint and then refreshes state.
 
 import { useEffect, useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { ShieldCheck, X } from "lucide-react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { AllowEntry, RepoWorkflow, Role, RuntimePreflight } from "../../lib/api";
 import { useStore } from "../../lib/store";
@@ -211,7 +211,7 @@ function AllowPanel({ entries }: { entries: AllowEntry[] }) {
                 onClick={() => remove(e.value)}
                 className={busy === e.value ? "opacity-50" : "hover:text-[var(--color-danger)]"}
               >
-                ✕
+                <X size={15} strokeWidth={2} />
               </IconButton>
             </div>
           ))
@@ -304,7 +304,7 @@ function ReposPanel({ repos }: { repos: string[] }) {
                 onClick={() => remove(r)}
                 className={busy === r ? "opacity-50" : "hover:text-[var(--color-danger)]"}
               >
-                ✕
+                <X size={15} strokeWidth={2} />
               </IconButton>
             </div>
           ))

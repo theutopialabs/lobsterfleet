@@ -4,6 +4,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect } from "react";
 import type { ReactNode } from "react";
+import { X } from "lucide-react";
 import { IconButton } from "./Button";
 
 export function Sheet({
@@ -36,7 +37,7 @@ export function Sheet({
       {open && (
         <div className="fixed inset-0 z-50">
           <motion.div
-            className="absolute inset-0 bg-black/55 backdrop-blur-sm"
+            className="absolute inset-0 bg-black/60 backdrop-blur-md"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -44,7 +45,7 @@ export function Sheet({
             onClick={onClose}
           />
           <motion.aside
-            className="glass absolute right-0 top-0 flex h-full w-full max-w-[460px] flex-col border-l border-y-0 border-r-0"
+            className="glass absolute right-0 top-0 flex h-full w-full max-w-[460px] flex-col border-l border-y-0 border-r-0 shadow-[var(--shadow-deep)]"
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
@@ -56,7 +57,7 @@ export function Sheet({
                 {subtitle && <p className="mt-0.5 text-sm text-[var(--color-muted)]">{subtitle}</p>}
               </div>
               <IconButton label="Close" onClick={onClose}>
-                ✕
+                <X size={16} strokeWidth={2} />
               </IconButton>
             </header>
             <div className="min-h-0 flex-1 overflow-auto px-6 py-5">{children}</div>

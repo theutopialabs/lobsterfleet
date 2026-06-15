@@ -1,5 +1,6 @@
 // Top bar with breadcrumb, connection pill, the user chip and sign out.
 
+import { LogOut } from "lucide-react";
 import { useStore } from "../lib/store";
 import { IconButton } from "../components/Button";
 import type { Section } from "./Sidebar";
@@ -32,7 +33,9 @@ export function TopBar({ section }: { section: Section }) {
         >
           <span
             className={`h-1.5 w-1.5 rounded-full ${
-              connected ? "bg-[var(--color-success)] animate-pulse" : "bg-[var(--color-danger)]"
+              connected
+                ? "bg-[var(--color-success)] live-dot shadow-[0_0_6px_currentColor]"
+                : "bg-[var(--color-danger)]"
             }`}
           />
           {connected ? "connected" : "offline"}
@@ -51,7 +54,7 @@ export function TopBar({ section }: { section: Section }) {
           )}
         </div>
         <IconButton label="Sign out" onClick={() => void logout()}>
-          ⏻
+          <LogOut size={16} strokeWidth={2} />
         </IconButton>
       </div>
     </header>

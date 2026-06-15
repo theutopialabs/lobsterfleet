@@ -3,7 +3,7 @@
 
 import { motion } from "framer-motion";
 import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, GitBranch } from "lucide-react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { InteractiveSession } from "../../lib/api";
 import {
@@ -115,7 +115,10 @@ export function BoxTile({
 
       <div className="flex flex-wrap gap-1.5">
         <Chip mono>{session.id}</Chip>
-        <Chip>⎇ {session.branch}</Chip>
+        <Chip>
+          <GitBranch size={11} strokeWidth={2} />
+          {session.branch}
+        </Chip>
         <Chip>{runtimeLabel(session.runtime)}</Chip>
         {session.multiplayerMode && <Chip>multiplayer</Chip>}
         {(session.boardLinks ?? []).map((link) => (

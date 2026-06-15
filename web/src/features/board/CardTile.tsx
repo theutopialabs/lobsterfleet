@@ -2,7 +2,7 @@
 // with a left accent border colored by lane and Start/Advance actions.
 
 import { motion } from "framer-motion";
-import { Trash2 } from "lucide-react";
+import { ArrowRight, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { Card, Lane } from "../../lib/api";
@@ -173,7 +173,8 @@ export function CardTile({
                 busy={busy === "advance"}
                 onClick={() => runAction("advance", `Advanced ${card.id}`)}
               >
-                Advance →
+                Advance
+                <ArrowRight size={14} strokeWidth={2} />
               </Button>
             )}
           </>

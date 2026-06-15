@@ -4,6 +4,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { Card, RuntimeCapabilities } from "../../lib/api";
 import {
@@ -92,7 +93,7 @@ export function RunDrawer({ card, onClose }: { card: Card | null; onClose: () =>
               </div>
               {run && <StatePill status={run.status} />}
               <IconButton label="Close" onClick={onClose}>
-                ✕
+                <X size={16} strokeWidth={2} />
               </IconButton>
             </header>
 

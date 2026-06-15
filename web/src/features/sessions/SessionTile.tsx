@@ -4,6 +4,7 @@
 
 import { motion } from "framer-motion";
 import { useState } from "react";
+import { GitBranch, Maximize2, Minimize2, Monitor, ScrollText, X } from "lucide-react";
 import { ApiError, endpoints } from "../../lib/api";
 import type { InteractiveSession } from "../../lib/api";
 import {
@@ -69,24 +70,27 @@ export function SessionTile({
       <div className="flex items-center gap-2 border-b border-[var(--color-line)] px-4 py-2.5">
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-[var(--color-ink)]">{session.repo}</div>
-          <div className="truncate text-[11px] text-[var(--color-faint)]">⎇ {session.branch}</div>
+          <div className="flex items-center gap-1 truncate text-[11px] text-[var(--color-faint)]">
+            <GitBranch size={11} strokeWidth={2} className="shrink-0" />
+            <span className="truncate">{session.branch}</span>
+          </div>
         </div>
         <StatePill status={session.status} label={sessionStatusLabel(session.status)} />
         {showActions && (
           <div className="ml-1 flex items-center">
             <IconButton label={maximized ? "Restore" : "Maximize"} onClick={onMaximize}>
-              {maximized ? "▢" : "⤢"}
+              {maximized ? <Minimize2 size={15} strokeWidth={2} /> : <Maximize2 size={15} strokeWidth={2} />}
             </IconButton>
             {vnc && (
               <IconButton
                 label="Open VNC"
                 onClick={() => window.open(session.vncUrl!, "_blank", "noopener,noreferrer")}
               >
-                ▷
+                <Monitor size={15} strokeWidth={2} />
               </IconButton>
             )}
             <IconButton label="Logs" onClick={() => onLogs(session)}>
-              ☰
+              <ScrollText size={15} strokeWidth={2} />
             </IconButton>
             {session.canManage && (
               <IconButton
@@ -94,7 +98,7 @@ export function SessionTile({
                 onClick={closeSession}
                 className={busy ? "opacity-50" : "hover:text-[var(--color-danger)]"}
               >
-                ✕
+                <X size={15} strokeWidth={2} />
               </IconButton>
             )}
           </div>
